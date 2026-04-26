@@ -257,6 +257,126 @@ function findHammerer()
 end
 
 -- ===========================
+-- Helper: Find Available Jail Restraint
+-- ===========================
+
+function findAvailableJailRestraint()
+    for _, bld in ipairs(df.global.world.buildings.other.CHAIN) do
+        -- Must be assigned to a jail zone
+        local is_jail = false
+        if bld.relations then
+            for _, zone in ipairs(bld.relations) do
+                if zone and zone:getType() == df.building_type.Civzone and zone.type == df.civzone_type.Dungeon then
+                    is_jail = true
+                    break
+                end
+            end
+        end
+        
+        -- Must be empty
+        if is_jail and not bld.chained then
+            return bld
+        end
+    end
+    return nil
+end
+
+-- ===========================
+-- Helper: Detain Unit
+-- ===========================
+
+function detainUnit(unit)
+    -- Step 1: Try to use the punishment's pre-assigned chain first
+    local restraint = nil
+    for _, punishment in ipairs(df.global.plotinfo.punishments) do
+        if punishment.criminal == unit.id and punishment.chain ~= -1 then
+            local assigned = df.building.find(punishment.chain)
+            if assigned and not assigned.chained then
+                restraint = assigned
+                break
+            end
+        end
+    end
+    
+    -- Step 2: Fall back to any empty jail chain
+    if not restraint then
+        restraint = findAvailableJailRestraint()
+    end
+    
+    if not restraint then
+        return false, "No empty jail chains/ropes found!"
+    end
+    
+    local ok, err = pcall(function()
+        -- Teleport unit to restraint
+        unit.pos.x = restraint.centerx
+        unit.pos.y = restraint.centery
+        unit.pos.z = restraint.z
+        
+        -- Link building -> unit
+        restraint.chained = unit
+        
+        -- Link unit -> building via general_ref
+        local has_chain_ref = false
+        for _, ref in ipairs(unit.general_refs) do
+            if ref:getType() == df.general_ref_type.BUILDING_CHAIN then
+                ref.building_id = restraint.id
+                has_chain_ref = true
+                break
+            end
+        end
+        if not has_chain_ref then
+            local new_ref = df.general_ref_building_chainst:new()
+            new_ref.building_id = restraint.id
+            unit.general_refs:insert('#', new_ref)
+        end
+        
+        -- Set flags
+        unit.flags1.chained = true
+        unit.flags1.caged = false
+        
+        -- Stop their current pathing/job
+        unit.path.dest.x = -30000
+        unit.path.dest.y = -30000
+        unit.path.dest.z = -30000
+        unit.path.path.x:resize(0)
+        unit.path.path.y:resize(0)
+        unit.path.path.z:resize(0)
+    end)
+    
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+function releaseUnit(unit)
+    local ok, err = pcall(function()
+        local target_chain = nil
+        for _, bld in ipairs(df.global.world.buildings.other.CHAIN) do
+            if bld.chained and bld.chained.id == unit.id then
+                target_chain = bld
+                break
+            end
+        end
+
+        if target_chain then
+            target_chain.chained = nil
+        end
+
+        unit.flags1.chained = false
+
+        for i = #unit.general_refs - 1, 0, -1 do
+            local ref = unit.general_refs[i]
+            if ref:getType() == df.general_ref_type.BUILDING_CHAIN then
+                unit.general_refs:erase(i)
+            end
+        end
+    end)
+    
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+-- ===========================
 -- Helper: Create Interrogation Job
 -- ===========================
 
@@ -671,7 +791,7 @@ function JusticeHQ:init()
                         },
                         -- ACTIONS
                         widgets.HotkeyLabel{
-                            frame = {l = 0, t = 1, w = 18},
+                            frame = {l = 0, t = 1, w = 15},
                             key = 'CUSTOM_I',
                             label = 'Interrogate',
                             text_pen = COLOR_LIGHTGREEN,
@@ -689,7 +809,7 @@ function JusticeHQ:init()
                             on_activate = self:callback('onInterrogate'),
                         },
                         widgets.HotkeyLabel{
-                            frame = {l = 20, t = 1, w = 12},
+                            frame = {l = 16, t = 1, w = 11},
                             key = 'CUSTOM_P',
                             label = 'Pardon',
                             text_pen = COLOR_LIGHTCYAN,
@@ -697,7 +817,7 @@ function JusticeHQ:init()
                             on_activate = self:callback('onPardon'),
                         },
                         widgets.HotkeyLabel{
-                            frame = {l = 34, t = 1, w = 13},
+                            frame = {l = 28, t = 1, w = 12},
                             key = 'CUSTOM_K',
                             label = 'Execute',
                             text_pen = COLOR_RED,
@@ -705,7 +825,33 @@ function JusticeHQ:init()
                             on_activate = self:callback('onExecute'),
                         },
                         widgets.HotkeyLabel{
-                            frame = {l = 49, t = 1, w = 12},
+                            frame = {l = 41, t = 1, w = 11},
+                            key = 'CUSTOM_D',
+                            label = 'Detain',
+                            text_pen = COLOR_LIGHTMAGENTA,
+                            visible = function()
+                                if self.selected_suspect and self.selected_suspect.unit then
+                                    return not self.selected_suspect.unit.flags1.chained
+                                end
+                                return true
+                            end,
+                            on_activate = self:callback('onDetain'),
+                        },
+                        widgets.HotkeyLabel{
+                            frame = {l = 41, t = 1, w = 12},
+                            key = 'CUSTOM_U',
+                            label = 'Release',
+                            text_pen = COLOR_LIGHTGREEN,
+                            visible = function()
+                                if self.selected_suspect and self.selected_suspect.unit then
+                                    return self.selected_suspect.unit.flags1.chained
+                                end
+                                return false
+                            end,
+                            on_activate = self:callback('onRelease'),
+                        },
+                        widgets.HotkeyLabel{
+                            frame = {l = 53, t = 1, w = 11},
                             key = 'CUSTOM_C',
                             label = 'Export',
                             text_pen = COLOR_GREY,
@@ -713,7 +859,7 @@ function JusticeHQ:init()
                             on_activate = self:callback('exportTabToFile'),
                         },
                         widgets.HotkeyLabel{
-                            frame = {l = 63, t = 1, w = 16},
+                            frame = {l = 65, t = 1, w = 16},
                             key = 'CUSTOM_CTRL_C',
                             label = 'Copy',
                             text_pen = COLOR_GREY,
@@ -2764,6 +2910,68 @@ function JusticeHQ:onInput(keys)
         return true
     end
     return self:inputToSubviews(keys)
+end
+
+function JusticeHQ:onDetain()
+    if not self.selected_suspect then
+        dfhack.gui.showAnnouncement("CI-HQ: Select a suspect first.", COLOR_YELLOW)
+        return
+    end
+    
+    local unit = self.selected_suspect.unit
+    if not unit then return end
+    
+    if unit.flags1.chained then
+        dfhack.gui.showAnnouncement("CI-HQ: " .. dfhack.units.getReadableName(unit) .. " is already detained.", COLOR_YELLOW)
+        return
+    end
+    local name = dfhack.units.getReadableName(unit)
+    local self_ref = self
+    dialogs.showYesNoPrompt(
+        'CI-HQ: Force Detainment',
+        'Target: ' .. name .. '\n\n' ..
+        'This action bypasses the normal Dwarf Fortress job queue.\n' ..
+        'The suspect will be instantly teleported to a dungeon chain and\n' ..
+        'forcibly restrained by editing their memory state.\n\n' ..
+        'Authorize forced detainment?',
+        COLOR_LIGHTMAGENTA,
+        function()
+            local ok, err = detainUnit(unit)
+            if ok then
+                dfhack.gui.showAnnouncement("CI-HQ: " .. name .. " has been forcibly detained in the dungeon.", COLOR_LIGHTMAGENTA, true)
+                self_ref:refreshCurrentDossier()
+            else
+                dfhack.gui.showAnnouncement("CI-HQ: Detainment failed. " .. tostring(err), COLOR_RED, true)
+            end
+        end
+    )
+end
+
+function JusticeHQ:onRelease()
+    if not self.selected_suspect then return end
+    local unit = self.selected_suspect.unit
+    if not unit or not unit.flags1.chained then return end
+
+    local name = dfhack.units.getReadableName(unit)
+    local self_ref = self
+    dialogs.showYesNoPrompt(
+        'CI-HQ: Force Release',
+        'Target: ' .. name .. '\n\n' ..
+        'This action bypasses the normal Dwarf Fortress job queue.\n' ..
+        'The suspect will be instantly released from their chains\n' ..
+        'by editing their memory state.\n\n' ..
+        'Authorize forced release?',
+        COLOR_LIGHTGREEN,
+        function()
+            local ok, err = releaseUnit(unit)
+            if ok then
+                dfhack.gui.showAnnouncement("CI-HQ: " .. name .. " has been forcibly released.", COLOR_LIGHTGREEN, true)
+                self_ref:refreshCurrentDossier()
+            else
+                dfhack.gui.showAnnouncement("CI-HQ: Release failed. " .. tostring(err), COLOR_RED, true)
+            end
+        end
+    )
 end
 
 function JusticeHQ:onPardon()
