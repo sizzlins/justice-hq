@@ -25,7 +25,8 @@ local utils = require('utils')
 -- Key = unit.id, Value = {name, retries, max_retries, status, unit_id, hf_id}
 interrogation_watchlist = interrogation_watchlist or {}
 
-local MAX_RETRIES = 5
+local MAX_RETRIES = 15
+local MAX_CONSECUTIVE_DUDS = 3  -- stop after this many failed attempts in a row
 local GLOBAL_KEY = 'gui/justice-hq'
 
 enabled = enabled or false
@@ -43,6 +44,7 @@ local function persist_state()
             full_name = watch.full_name,
             retries = watch.retries,
             max_retries = watch.max_retries,
+            consecutive_duds = watch.consecutive_duds,
             status = watch.status,
             unit_id = watch.unit_id,
             hf_id = watch.hf_id,
@@ -52,6 +54,19 @@ local function persist_state()
         enabled = enabled,
         watchlist = watchlist_data,
     })
+end
+
+local INTERRUPTABLE_JOBS = {}
+for _, name in ipairs({
+    'StoreItemInStockpile', 'StoreItemInArchive', 'StoreItemInBag',
+    'StoreItemInBarrel', 'StoreItemInBin', 'StoreItemInChest',
+    'StoreOwnedItem', 'StoreItemInHospital', 'StoreItemOnDisplay',
+    'StoreItemInTomb', 'StoreItemInVehicles', 'CleanItems',
+    'CleanSelf', 'CollectSand', 'CollectClay'
+}) do
+    if df.job_type[name] then
+        INTERRUPTABLE_JOBS[df.job_type[name]] = true
+    end
 end
 
 local function load_state()
@@ -518,6 +533,7 @@ function JusticeHQ:init()
     self.filter_level = 1
     self.suspects = self:gatherSuspects()
     self.selected_suspect = nil
+    self.init_complete = false
     
     if GLOBAL_SELECTED_SUSPECT_ID then
         for _, s in ipairs(self.suspects) do
@@ -796,15 +812,7 @@ function JusticeHQ:init()
                             label = 'Interrogate',
                             text_pen = COLOR_LIGHTGREEN,
                             disabled_pen = COLOR_DARKGREY,
-                            disabled = function()
-                                if self.selected_suspect and interrogation_watchlist[self.selected_suspect.unit.id] then
-                                    local status = interrogation_watchlist[self.selected_suspect.unit.id].status
-                                    if status == 'active' or status == 'dispatched' then
-                                        return true
-                                    end
-                                end
-                                return false
-                            end,
+                            disabled = false,
                             visible = true,
                             on_activate = self:callback('onInterrogate'),
                         },
@@ -878,6 +886,7 @@ function JusticeHQ:init()
     else
         self.subviews.pages:setSelected(1)
     end
+    self.init_complete = true
 end
 
 -- ===========================
@@ -1124,11 +1133,12 @@ function JusticeHQ:buildEvidence(s)
                 pts = pts, color = COLOR_GREEN,
             })
         elseif watch.status == 'concluded' then
-            local pts = -10
+            local pts = 10
             score = score + pts
             table.insert(evidence, {
-                text = "INTERROGATION CONCLUDED (no new intel)",
-                pts = pts, color = COLOR_CYAN,
+                text = "SUSPECT RESISTED " .. (watch.retries or '?') .. " interrogation(s)",
+                detail = "Subject withstood all interrogation attempts without revealing information.",
+                pts = pts, color = COLOR_YELLOW,
             })
         end
     end
@@ -2056,6 +2066,8 @@ function JusticeHQ:buildNetworkChoices()
 end
 
 function JusticeHQ:onSelectSuspect(idx, choice)
+    -- Don't let auto-select during init overwrite the saved suspect
+    if not self.init_complete and GLOBAL_SELECTED_SUSPECT_ID then return end
     if not choice or not choice.data then
         self.selected_suspect = nil
         GLOBAL_SELECTED_SUSPECT_ID = nil
@@ -2117,6 +2129,7 @@ function JusticeHQ:onSubmitCase(idx, choice)
 end
 
 function JusticeHQ:onSelectConvict(idx, choice)
+    if not self.init_complete and GLOBAL_SELECTED_SUSPECT_ID then return end
     if not choice or not choice.data then
         self.selected_suspect = nil
         GLOBAL_SELECTED_SUSPECT_ID = nil
@@ -2134,6 +2147,7 @@ function JusticeHQ:onSubmitConvict(idx, choice)
 end
 
 function JusticeHQ:onSelectNetwork(idx, choice)
+    if not self.init_complete and GLOBAL_SELECTED_SUSPECT_ID then return end
     if not choice or not choice.data then
         self.selected_suspect = nil
         GLOBAL_SELECTED_SUSPECT_ID = nil
@@ -3093,21 +3107,43 @@ function JusticeHQ:onInterrogate()
     end
     
     -- Early guard check with actionable guidance
-    if not findCaptainOfGuard() then
+    local guard = findCaptainOfGuard()
+    if not guard then
         dfhack.gui.showAnnouncement(
             "CI-HQ: No Captain of the Guard or Sheriff is assigned! Open the Nobles screen (n) and appoint one.",
             COLOR_LIGHTRED, true)
         return
     end
     
-    -- Check if already on watchlist
+    -- Prevent interrogating the Captain themselves
+    if guard.id == uid then
+        dfhack.gui.showAnnouncement("CI-HQ: The Captain of the Guard cannot interrogate themselves!", COLOR_LIGHTRED)
+        return
+    end
+    
+    -- If already on watchlist and active/dispatched, treat as CANCEL
     if interrogation_watchlist[uid] then
         local watch = interrogation_watchlist[uid]
-        if watch.status == 'active' then
-            dfhack.gui.showAnnouncement("Already interrogating " .. suspect.first_name .. " (" .. watch.retries .. "/" .. watch.max_retries .. ")", COLOR_YELLOW)
+        if watch.status == 'active' or watch.status == 'dispatched' then
+            dialogs.showYesNoPrompt(
+                'Cancel Interrogation?',
+                'Are you sure you want to cancel the interrogation loop on ' .. suspect.first_name .. '?\n\n' ..
+                'Status: ' .. watch.status:upper() .. '\n' ..
+                'Attempts so far: ' .. (watch.retries or 0) .. '/' .. watch.max_retries .. '\n\n' ..
+                'The Captain of the Guard will stop re-dispatching to this suspect.',
+                COLOR_YELLOW,
+                function()
+                    watch.status = 'cancelled'
+                    dfhack.gui.showAnnouncement("CI-HQ: Interrogation of " .. suspect.first_name .. " cancelled.", COLOR_YELLOW)
+                    persist_state()
+                    self:refreshCurrentDossier()
+                end
+            )
             return
-        elseif watch.status == 'gave_up' or watch.status == 'escaped' then
+        elseif watch.status == 'gave_up' or watch.status == 'escaped' or watch.status == 'concluded' or watch.status == 'cancelled' or watch.status == 'confessed' then
+            -- Allow re-interrogation from any terminal state
             watch.retries = 0
+            watch.consecutive_duds = 0
             watch.status = 'active'
             dfhack.gui.showAnnouncement("Resuming interrogation of " .. suspect.first_name .. "!", COLOR_LIGHTGREEN)
         end
@@ -3127,6 +3163,16 @@ function JusticeHQ:onInterrogate()
     -- Try to create a real interrogation job
     local ok, err = tryCreateInterrogationJob(suspect.unit)
     if ok then
+        -- Snapshot report count NOW so the monitor can detect the first interrogation's results
+        local watch = interrogation_watchlist[uid]
+        local hf = df.historical_figure.find(suspect.unit.hist_figure_id)
+        if hf and hf.info and hf.info.relationships and hf.info.relationships.intrigues then
+            watch.last_report_count = #hf.info.relationships.intrigues.intrigue
+        else
+            watch.last_report_count = 0
+        end
+        watch.status = 'dispatched'
+        watch.dispatched_tick = df.global.cur_year_tick
         dfhack.gui.showAnnouncement("CI-HQ: Captain dispatched to interrogate " .. suspect.first_name .. "!", COLOR_LIGHTGREEN)
     else
         dfhack.gui.showAnnouncement("CI-HQ: Could not auto-dispatch (" .. tostring(err) .. ")", COLOR_YELLOW)
@@ -3144,20 +3190,9 @@ end
 -- ===========================
 
 monitor_running = monitor_running or false
+monitor_last_scheduled_tick = monitor_last_scheduled_tick or nil
 
--- Jobs that are OK to interrupt for interrogation duty
-local INTERRUPTABLE_JOBS = {
-    [df.job_type.StoreItemInStockpile] = true,
-    [df.job_type.StoreItemInBag] = true,
-    [df.job_type.StoreItemInVehicle] = true,
-    [df.job_type.StoreItemInBarrel] = true,
-    [df.job_type.StoreItemInBin] = true,
-    [df.job_type.MakeCrafts] = true,
-    [df.job_type.CarveFortification] = true,
-    [df.job_type.DetailFloor] = true,
-    [df.job_type.DetailWall] = true,
-    [df.job_type.CleanSelf] = true,
-}
+
 
 function isSuspectStillThreat(uid)
     local unit = df.unit.find(uid)
@@ -3174,10 +3209,10 @@ function isSuspectStillThreat(uid)
     local cd = getUnitCrimeData(unit)
     local has_unsolved = cd.times_accused > cd.times_convicted
     
-    -- Only still a threat if intrigue data AND unsolved crimes remain
-    -- If all crimes are convicted, confession was successful even if intrigue data lingers
-    if cd.times_accused > 0 and not has_unsolved then
-        return false  -- All crimes resolved
+    -- Only fully resolved if all crimes convicted AND no active intrigue plots remain.
+    -- A mastermind with a convicted theft but 3 active assassination plots is still a threat.
+    if cd.times_accused > 0 and not has_unsolved and not has_intrigue_threat then
+        return false  -- All crimes resolved and no intrigue threat
     end
     
     return has_intrigue_threat
@@ -3211,7 +3246,7 @@ function dispatchGuardToSuspect(uid)
         end
     end
     
-    -- Dispatch!
+    -- Dispatch using proper engine linkage (same pattern as tryCreateInterrogationJob)
     local ok, err = pcall(function()
         local job = df.job:new()
         job.job_type = df.job_type.InterrogateSubject
@@ -3224,112 +3259,169 @@ function dispatchGuardToSuspect(uid)
         target_ref.unit_id = unit.id
         job.general_refs:insert('#', target_ref)
         
-        local worker_ref = df.general_ref_unit_workerst:new()
-        worker_ref.unit_id = guard.id
-        job.general_refs:insert('#', worker_ref)
-        
-        guard.job.current_job = job
+        -- Link into world properly so the DF engine manages the job lifecycle
+        dfhack.job.linkIntoWorld(job, true)
+        dfhack.job.addWorker(job, guard)
     end)
     
     return ok
 end
 
 function interrogationMonitorTick()
-    local any_active = false
-    
-    for uid, watch in pairs(interrogation_watchlist) do
-        if watch.status == 'active' or watch.status == 'dispatched' then
-            -- Check if suspect confessed
-            if not isSuspectStillThreat(uid) then
-                watch.status = 'confessed'
-                dfhack.gui.showAnnouncement(
-                    "CI-HQ: " .. watch.name .. " has confessed! Intelligence extracted.",
-                    COLOR_LIGHTGREEN)
-                CRIME_CACHE = nil
-                INTERROGATION_HISTORY_CACHE = nil
-                persist_state()
-            else
-                local unit = df.unit.find(uid)
-                if not unit or not dfhack.units.isActive(unit) then
-                    watch.status = 'escaped'
+    local ok, err = pcall(function()
+        local any_active = false
+        
+        for uid, watch in pairs(interrogation_watchlist) do
+            if watch.status == 'active' or watch.status == 'dispatched' then
+                -- Check if suspect confessed
+                if not isSuspectStillThreat(uid) then
+                    watch.status = 'confessed'
                     dfhack.gui.showAnnouncement(
-                        "CI-HQ: " .. watch.name .. " has left the map! Interrogation aborted.",
-                        COLOR_RED)
+                        "CI-HQ: " .. watch.name .. " has confessed! Intelligence extracted.",
+                        COLOR_LIGHTGREEN)
+                    CRIME_CACHE = nil
+                    INTERROGATION_HISTORY_CACHE = nil
                     persist_state()
                 else
-                    any_active = true
-                    
-                    local guard = findCaptainOfGuard()
-                    local guard_is_interrogating = guard and guard.job.current_job
-                        and guard.job.current_job.job_type == df.job_type.InterrogateSubject
-                    
-                    if watch.status == 'active' then
-                        if not guard_is_interrogating then
-                            if dispatchGuardToSuspect(uid) then
-                                watch.status = 'dispatched'
-                                watch.dispatched_tick = df.global.cur_year_tick
-                                dfhack.gui.showAnnouncement(
-                                    "CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".",
-                                    COLOR_LIGHTGREEN)
-                            end
+                    local unit = df.unit.find(uid)
+                    if not unit or not dfhack.units.isActive(unit) then
+                        watch.status = 'escaped'
+                        dfhack.gui.showAnnouncement(
+                            "CI-HQ: " .. watch.name .. " has left the map! Interrogation aborted.",
+                            COLOR_RED)
+                        persist_state()
+                    else
+                        any_active = true
+                        
+                        -- Check if Captain is currently interrogating
+                        local guard = findCaptainOfGuard()
+                        local guard_is_interrogating = false
+                        if guard and guard.job.current_job then
+                            guard_is_interrogating = guard.job.current_job.job_type == df.job_type.InterrogateSubject
                         end
-                    elseif watch.status == 'dispatched' then
-                        -- Grace period: wait at least 200 ticks (~8 seconds) for guard to start walking
-                        local elapsed = df.global.cur_year_tick - (watch.dispatched_tick or 0)
-                        if elapsed < 200 then
-                            -- Still within grace period, guard may be pathing
-                            if guard_is_interrogating then
-                                -- Guard actually started! Track that we've seen the job running
-                                watch.seen_interrogating = true
-                            end
-                        else
+                        
+                        if watch.status == 'active' then
                             if not guard_is_interrogating then
-                                -- Job disappeared — either completed or canceled
-                                if watch.seen_interrogating then
-                                    -- Guard WAS interrogating and now stopped = real conclusion
-                                    watch.retries = (watch.retries or 0) + 1
+                                -- Snapshot the current report count before dispatching
+                                local hf = df.historical_figure.find(unit.hist_figure_id)
+                                if hf and hf.info and hf.info.relationships and hf.info.relationships.intrigues then
+                                    watch.last_report_count = #hf.info.relationships.intrigues.intrigue
+                                else
+                                    watch.last_report_count = 0
+                                end
+                                
+                                if dispatchGuardToSuspect(uid) then
+                                    watch.status = 'dispatched'
+                                    watch.dispatched_tick = df.global.cur_year_tick
+                                    dfhack.gui.showAnnouncement(
+                                        "CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".",
+                                        COLOR_LIGHTGREEN)
+                                end
+                            end
+                        elseif watch.status == 'dispatched' then
+                            -- Check if the job finished
+                            local elapsed = df.global.cur_year_tick - (watch.dispatched_tick or 0)
+                            -- Handle year rollover: if dispatched_tick > cur_year_tick, year wrapped
+                            if elapsed < 0 then elapsed = 999 end
+                            
+                            -- Wait for guard to finish or grace period to expire
+                            if not guard_is_interrogating and elapsed >= 100 then
+                                -- Guard is idle and enough time passed for the job to have completed.
+                                -- Check if new intrigue reports appeared.
+                                local hf = df.historical_figure.find(unit.hist_figure_id)
+                                local reports_found = false
+                                local is_dud = false
+                                
+                                if hf and hf.info and hf.info.relationships and hf.info.relationships.intrigues then
+                                    local i_list = hf.info.relationships.intrigues.intrigue
+                                    if #i_list > (watch.last_report_count or 0) then
+                                        reports_found = true
+                                        local last = i_list[#i_list-1]
+                                        if last.role == -1 and last.strategy == -1 then
+                                            is_dud = true
+                                        end
+                                    end
+                                end
+
+                                watch.retries = (watch.retries or 0) + 1
+                                
+                                if reports_found and not is_dud then
+                                    -- New intel extracted! Reset dud counter, continue.
+                                    watch.consecutive_duds = 0
                                     if watch.retries >= watch.max_retries then
                                         watch.status = 'concluded'
                                         dfhack.gui.showAnnouncement(
-                                            "CI-HQ: Interrogation of " .. watch.name .. " concluded after " .. watch.retries .. " attempts. Check Justice > Intelligence tab.",
-                                            COLOR_CYAN)
+                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.",
+                                            COLOR_YELLOW)
                                         persist_state()
                                     else
-                                        -- Retry: reset to active and re-dispatch next tick
                                         watch.status = 'active'
-                                        watch.seen_interrogating = false
                                         watch.dispatched_tick = nil
                                         dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " did not break. Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...",
-                                            COLOR_YELLOW)
+                                            "CI-HQ: " .. watch.name .. " spilled some intel! Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...",
+                                            COLOR_LIGHTGREEN)
+                                        persist_state()
                                     end
                                 else
-                                    -- Guard never even started — job was likely canceled/blocked
-                                    watch.status = 'active'
-                                    watch.dispatched_tick = nil
-                                    -- Silently retry, don't spam the player
+                                    -- No new intel this round (suspect refused or had nothing new).
+                                    -- DF produces no intrigue entry for either case, so we can't
+                                    -- distinguish them. Count toward the consecutive dud limit.
+                                    watch.consecutive_duds = (watch.consecutive_duds or 0) + 1
+                                    if watch.consecutive_duds >= MAX_CONSECUTIVE_DUDS then
+                                        watch.status = 'concluded'
+                                        dfhack.gui.showAnnouncement(
+                                            "CI-HQ: " .. watch.name .. " revealed no new intel after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.",
+                                            COLOR_YELLOW)
+                                        persist_state()
+                                    elseif watch.retries >= watch.max_retries then
+                                        watch.status = 'concluded'
+                                        dfhack.gui.showAnnouncement(
+                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.",
+                                            COLOR_YELLOW)
+                                        persist_state()
+                                    else
+                                        watch.status = 'active'
+                                        watch.dispatched_tick = nil
+                                        dfhack.gui.showAnnouncement(
+                                            "CI-HQ: " .. watch.name .. " revealed no new intel (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...",
+                                            COLOR_CYAN)
+                                        persist_state()
+                                    end
                                 end
-                            else
-                                -- Guard is actively interrogating right now
-                                watch.seen_interrogating = true
                             end
                         end
                     end
                 end
             end
         end
-    end
+        
+        if any_active then
+            monitor_last_scheduled_tick = df.global.cur_year_tick
+            dfhack.timeout(MONITOR_INTERVAL, 'ticks', interrogationMonitorTick)
+        else
+            monitor_running = false
+            monitor_last_scheduled_tick = nil
+        end
+    end)
     
-    if any_active then
+    if not ok then
+        -- Catch and report any error, then keep the monitor alive
+        dfhack.gui.showAnnouncement("CI-HQ: Monitor error: " .. tostring(err), COLOR_LIGHTRED)
+        print("CI-HQ MONITOR ERROR: " .. tostring(err))
+        -- Reschedule even on error so monitoring doesn't die silently
+        monitor_last_scheduled_tick = df.global.cur_year_tick
         dfhack.timeout(MONITOR_INTERVAL, 'ticks', interrogationMonitorTick)
-    else
-        monitor_running = false
     end
 end
 
+
 function startInterrogationMonitor()
-    if monitor_running then return end
+    -- Always force-start the monitor. The old liveness check was unreliable
+    -- because dfhack.timeout callbacks die on script reload and monitor_running
+    -- stays stale. Just always restart — duplicate starts are harmless since
+    -- the old callback chain is already dead.
     monitor_running = true
+    monitor_last_scheduled_tick = df.global.cur_year_tick
     dfhack.timeout(MONITOR_INTERVAL, 'ticks', interrogationMonitorTick)
 end
 
@@ -3375,8 +3467,15 @@ OVERLAY_WIDGETS = {hq_button=JusticeHQOverlay}
 GLOBAL_INITIAL_SCAN_DONE = GLOBAL_INITIAL_SCAN_DONE or false
 
 function ci_alert_monitor_tick()
-    -- Check for new interrogations ending...
-    interrogationMonitorTick()
+    -- Restart the interrogation monitor if any watches are active/dispatched
+    -- (Don't call interrogationMonitorTick directly — it self-schedules on a 50-tick loop.
+    --  Calling it here would create a dual execution path, double-counting retries.)
+    for _, watch in pairs(interrogation_watchlist) do
+        if watch.status == 'active' or watch.status == 'dispatched' then
+            startInterrogationMonitor()
+            break
+        end
+    end
     
     local is_initial_scan = not GLOBAL_INITIAL_SCAN_DONE
     
