@@ -245,7 +245,8 @@ function findCaptainOfGuard()
             local positions = dfhack.units.getNoblePositions(unit)
             if positions then
                 for _, pos in ipairs(positions) do
-                    if pos.position and pos.position.code == 'CAPTAIN_OF_THE_GUARD' then
+                    if pos.position and (pos.position.code == 'CAPTAIN_OF_THE_GUARD'
+                                      or pos.position.code == 'SHERIFF') then
                         return unit
                     end
                 end
