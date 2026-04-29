@@ -25,6 +25,19 @@ local utils = require('utils')
 -- Key = unit.id, Value = {name, retries, max_retries, status, unit_id, hf_id}
 interrogation_watchlist = interrogation_watchlist or {}
 
+-- Persistent UI state (survives close/reopen within same session)
+PERSISTENT_UI = PERSISTENT_UI or {
+    filter_level = 1,
+    case_filter_level = 1,
+    convict_filter_level = 1,
+    suspect_sort = 1,
+    cases_sort = 1,
+    convicts_sort = 1,
+    network_sort = 1,
+    search_text = {},
+    active_tab = 1,
+}
+
 local MAX_RETRIES = 15
 local MAX_CONSECUTIVE_DUDS = 3  -- stop after this many failed attempts in a row
 local GLOBAL_KEY = 'gui/justice-hq'
@@ -531,7 +544,9 @@ JusticeHQ.ATTRS = {
 
 function JusticeHQ:init()
     fixGhostCases()
-    self.filter_level = 1
+    self.filter_level = PERSISTENT_UI.filter_level or 1
+    self.case_filter_level = PERSISTENT_UI.case_filter_level or 1
+    self.convict_filter_level = PERSISTENT_UI.convict_filter_level or 1
     self.suspects = self:gatherSuspects()
     self.selected_suspect = nil
     self.init_complete = false
@@ -588,6 +603,7 @@ function JusticeHQ:init()
                     frame = {t = 0, l = 0},
                     labels = {'Suspects', 'Cases', 'Convicts', 'Network', 'Case File'},
                     on_select = function(idx)
+                        PERSISTENT_UI.active_tab = idx
                         self.subviews.pages:setSelected(idx)
                         self:rebuildActiveTab()
                     end,
@@ -612,6 +628,7 @@ function JusticeHQ:init()
                                     frame = {t = 0, l = 0, r = 0, b = 0},
                                     row_height = 3,
                                     choices = self:buildChoices(),
+                                    edit_on_change = function(text) PERSISTENT_UI.search_text[1] = text end,
                                     on_select = self:callback('onSelectSuspect'),
                                     on_submit = self:callback('onOpenCaseFile'),
                                 },
@@ -632,6 +649,7 @@ function JusticeHQ:init()
                                     frame = {t = 1, l = 0, r = 0, b = 0},
                                     row_height = 2,
                                     choices = self:buildCaseChoices(),
+                                    edit_on_change = function(text) PERSISTENT_UI.search_text[2] = text end,
                                     on_select = self:callback('onSelectCase'),
                                     on_submit = self:callback('onSubmitCase'),
                                 },
@@ -648,6 +666,7 @@ function JusticeHQ:init()
                                     frame = {t = 0, l = 0, r = 0, b = 0},
                                     row_height = 2,
                                     choices = self:buildConvictChoices(),
+                                    edit_on_change = function(text) PERSISTENT_UI.search_text[3] = text end,
                                     on_select = self:callback('onSelectConvict'),
                                     on_submit = self:callback('onSubmitConvict'),
                                 },
@@ -698,7 +717,7 @@ function JusticeHQ:init()
                         widgets.CycleHotkeyLabel{
                             view_id = 'filter_cycle',
                             frame = {l = 0, t = 0},
-                            key = 'CUSTOM_F',
+                            key = 'CUSTOM_CTRL_F',
                             label = 'Show:',
                             options = {
                                 {label = 'High threats', value = 1, pen = COLOR_RED},
@@ -706,14 +725,14 @@ function JusticeHQ:init()
                                 {label = 'All + Detained', value = 3, pen = COLOR_CYAN},
                                 {label = 'Everyone', value = 4, pen = COLOR_GREEN},
                             },
-                            initial_option = 1,
+                            initial_option = PERSISTENT_UI.filter_level or 1,
                             on_change = self:callback('onFilterChange'),
                             visible = function() return self.subviews.pages:getSelected() == 1 end,
                         },
                         widgets.CycleHotkeyLabel{
                             view_id = 'cases_filter_cycle',
                             frame = {l = 0, t = 0},
-                            key = 'CUSTOM_F',
+                            key = 'CUSTOM_CTRL_F',
                             label = 'Show:',
                             options = {
                                 {label = 'Open Cases', value = 1, pen = COLOR_LIGHTRED},
@@ -721,21 +740,21 @@ function JusticeHQ:init()
                                 {label = 'Closed Cases', value = 3, pen = COLOR_DARKGREY},
                                 {label = 'All Cases', value = 4, pen = COLOR_GREEN},
                             },
-                            initial_option = 1,
+                            initial_option = PERSISTENT_UI.case_filter_level or 1,
                             on_change = self:callback('onCasesFilterChange'),
                             visible = function() return self.subviews.pages:getSelected() == 2 end,
                         },
                         widgets.CycleHotkeyLabel{
                             view_id = 'convicts_filter',
                             frame = {l = 0, t = 0},
-                            key = 'CUSTOM_F',
+                            key = 'CUSTOM_CTRL_F',
                             label = 'Show:',
                             options = {
                                 {label = 'All Sentences', value = 1, pen = COLOR_WHITE},
                                 {label = 'Prison Only', value = 2, pen = COLOR_CYAN},
                                 {label = 'Beatings / Executions', value = 3, pen = COLOR_LIGHTRED},
                             },
-                            initial_option = 1,
+                            initial_option = PERSISTENT_UI.convict_filter_level or 1,
                             on_change = self:callback('onConvictsFilterChange'),
                             visible = function() return self.subviews.pages:getSelected() == 3 end,
                         },
@@ -743,20 +762,20 @@ function JusticeHQ:init()
                         widgets.CycleHotkeyLabel{
                             view_id = 'suspect_sort',
                             frame = {l = 30, t = 0},
-                            key = 'CUSTOM_S',
+                            key = 'CUSTOM_CTRL_S',
                             label = 'Sort:',
                             options = {
                                 {label = 'Threat Level', value = 1, pen = COLOR_WHITE},
                                 {label = 'Name', value = 2, pen = COLOR_WHITE},
                             },
-                            initial_option = 1,
+                            initial_option = PERSISTENT_UI.suspect_sort or 1,
                             on_change = self:callback('onFilterChange'),
                             visible = function() return self.subviews.pages:getSelected() == 1 end,
                         },
                         widgets.CycleHotkeyLabel{
                             view_id = 'cases_sort',
                             frame = {l = 30, t = 0},
-                            key = 'CUSTOM_S',
+                            key = 'CUSTOM_CTRL_S',
                             label = 'Sort:',
                             options = {
                                 {label = 'Newest Cases', value = 1, pen = COLOR_WHITE},
@@ -764,20 +783,20 @@ function JusticeHQ:init()
                                 {label = 'Accused Name', value = 3, pen = COLOR_WHITE},
                                 {label = 'Victim Name', value = 4, pen = COLOR_WHITE},
                             },
-                            initial_option = 1,
+                            initial_option = PERSISTENT_UI.cases_sort or 1,
                             on_change = self:callback('onCasesFilterChange'),
                             visible = function() return self.subviews.pages:getSelected() == 2 end,
                         },
                         widgets.CycleHotkeyLabel{
                             view_id = 'convicts_sort',
                             frame = {l = 30, t = 0},
-                            key = 'CUSTOM_S',
+                            key = 'CUSTOM_CTRL_S',
                             label = 'Sort:',
                             options = {
                                 {label = 'Time Left', value = 1, pen = COLOR_WHITE},
                                 {label = 'Name', value = 2, pen = COLOR_WHITE},
                             },
-                            initial_option = 1,
+                            initial_option = PERSISTENT_UI.convicts_sort or 1,
                             on_change = self:callback('onConvictsFilterChange'),
                             visible = function() return self.subviews.pages:getSelected() == 3 end,
                         },
@@ -796,14 +815,17 @@ function JusticeHQ:init()
                         widgets.CycleHotkeyLabel{
                             view_id = 'network_sort_cycle',
                             frame = {l = 30, t = 0, w = 28},
-                            key = 'CUSTOM_S',
+                            key = 'CUSTOM_CTRL_S',
                             label = 'Sort:',
                             options = {
                                 {label = 'Network Size', value = 1, pen = COLOR_WHITE},
                                 {label = 'Mastermind Name', value = 2, pen = COLOR_WHITE},
                             },
-                            initial_option = 1,
-                            on_change = function() self:rebuildActiveTab() end,
+                            initial_option = PERSISTENT_UI.network_sort or 1,
+                            on_change = function(val)
+                                PERSISTENT_UI.network_sort = val
+                                self:rebuildActiveTab()
+                            end,
                             visible = function() return self.subviews.pages:getSelected() == 4 end,
                         },
                         -- ACTIONS
@@ -885,7 +907,8 @@ function JusticeHQ:init()
         self.subviews.pages:setSelected(5)
         self:onOpenCaseFile(nil, {data = self.selected_suspect})
     else
-        self.subviews.pages:setSelected(1)
+        self.subviews.pages:setSelected(PERSISTENT_UI.active_tab or 1)
+        self:rebuildActiveTab()
     end
     self.init_complete = true
 end
@@ -1295,7 +1318,13 @@ function JusticeHQ:buildChoices()
 end
 
 function JusticeHQ:onFilterChange(new_val)
-    self.filter_level = new_val
+    if self.subviews.filter_cycle then
+        PERSISTENT_UI.filter_level = self.subviews.filter_cycle:getOptionValue()
+        self.filter_level = PERSISTENT_UI.filter_level
+    end
+    if self.subviews.suspect_sort then
+        PERSISTENT_UI.suspect_sort = self.subviews.suspect_sort:getOptionValue()
+    end
     local list = self.subviews.suspect_list
     list:setChoices(self:buildChoices())
     local choices = list:getChoices()
@@ -1305,13 +1334,25 @@ function JusticeHQ:onFilterChange(new_val)
 end
 
 function JusticeHQ:onCasesFilterChange(new_val)
-    if new_val then self.case_filter_level = new_val end
+    if self.subviews.cases_filter_cycle then
+        PERSISTENT_UI.case_filter_level = self.subviews.cases_filter_cycle:getOptionValue()
+        self.case_filter_level = PERSISTENT_UI.case_filter_level
+    end
+    if self.subviews.cases_sort then
+        PERSISTENT_UI.cases_sort = self.subviews.cases_sort:getOptionValue()
+    end
     local list = self.subviews.cases_list
     list:setChoices(self:buildCaseChoices())
 end
 
 function JusticeHQ:onConvictsFilterChange(new_val)
-    if new_val then self.convict_filter_level = new_val end
+    if self.subviews.convicts_filter then
+        PERSISTENT_UI.convict_filter_level = self.subviews.convicts_filter:getOptionValue()
+        self.convict_filter_level = PERSISTENT_UI.convict_filter_level
+    end
+    if self.subviews.convicts_sort then
+        PERSISTENT_UI.convicts_sort = self.subviews.convicts_sort:getOptionValue()
+    end
     local list = self.subviews.convicts_list
     if list then
         list:setChoices(self:buildConvictChoices())
@@ -1326,10 +1367,13 @@ function JusticeHQ:rebuildActiveTab()
     local page = self.subviews.pages:getSelected()
     if page == 1 then
         self.subviews.suspect_list:setChoices(self:buildChoices())
+        if PERSISTENT_UI.search_text[1] then self.subviews.suspect_list:setFilter(PERSISTENT_UI.search_text[1]) end
     elseif page == 2 then
         self.subviews.cases_list:setChoices(self:buildCaseChoices())
+        if PERSISTENT_UI.search_text[2] then self.subviews.cases_list:setFilter(PERSISTENT_UI.search_text[2]) end
     elseif page == 3 then
         self.subviews.convicts_list:setChoices(self:buildConvictChoices())
+        if PERSISTENT_UI.search_text[3] then self.subviews.convicts_list:setFilter(PERSISTENT_UI.search_text[3]) end
     elseif page == 4 then
         self.subviews.network_list:setChoices(self:buildNetworkChoices())
     end
