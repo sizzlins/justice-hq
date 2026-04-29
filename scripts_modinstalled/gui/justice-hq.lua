@@ -1,6 +1,11 @@
 --@ module=true
 --@ enable=true
 
+-- Version guard: bail early if key DF structures are missing
+if not df.global.plotinfo or not df.global.plotinfo.punishments then
+    qerror('CI-HQ requires Dwarf Fortress v50+ with DFHack. Unsupported version detected.')
+end
+
 --[====[
 gui/justice-hq
 ==============
@@ -34,6 +39,8 @@ PERSISTENT_UI = PERSISTENT_UI or {
     cases_sort = 1,
     convicts_sort = 1,
     network_sort = 1,
+    intel_filter_level = 1,
+    intel_sort = 1,
     search_text = {},
     active_tab = 1,
 }
@@ -193,6 +200,7 @@ INTERROGATION_HISTORY_CACHE = INTERROGATION_HISTORY_CACHE or nil
 
 function initCrimeCache()
     CRIME_CACHE = {}
+    CRIME_CACHE_HFID = {}
     INTERROGATION_HISTORY_CACHE = {}
     for _, crime in ipairs(df.global.world.crimes.all) do
         local function add_to_cache(uid)
@@ -209,9 +217,23 @@ function initCrimeCache()
                 table.insert(CRIME_CACHE[uid].crimes_list, crime)
             end
         end
+        local function add_to_hf_cache(hfid)
+            if hfid ~= -1 then
+                CRIME_CACHE_HFID[hfid] = CRIME_CACHE_HFID[hfid] or {}
+                table.insert(CRIME_CACHE_HFID[hfid], crime)
+            end
+        end
+        
         add_to_cache(crime.accused)
         if crime.criminal ~= crime.accused then
             add_to_cache(crime.criminal)
+        end
+        
+        if crime.accused_hf and crime.accused_hf.hfid ~= -1 then
+            add_to_hf_cache(crime.accused_hf.hfid)
+        end
+        if crime.criminal_hf and crime.criminal_hf.hfid ~= -1 and crime.criminal_hf.hfid ~= crime.accused_hf.hfid then
+            add_to_hf_cache(crime.criminal_hf.hfid)
         end
     end
 
@@ -219,7 +241,12 @@ function initCrimeCache()
     for i = #events - 1, 0, -1 do
         local event = events[i]
         if df.history_event_hf_interrogatedst:is_instance(event) then
-            INTERROGATION_HISTORY_CACHE[event.target_hf] = (INTERROGATION_HISTORY_CACHE[event.target_hf] or 0) + 1
+            pcall(function()
+                local thf = event.target_hf or event.subject_hf
+                if thf then
+                    INTERROGATION_HISTORY_CACHE[thf] = (INTERROGATION_HISTORY_CACHE[thf] or 0) + 1
+                end
+            end)
         end
         -- Stop scanning once we're too far back (performance)
         if event.year < df.global.cur_year - 5 then break end
@@ -460,12 +487,14 @@ function fixGhostCases()
     if not df.global.world.crimes then return end
     local fixed_count = 0
     for _, crime in ipairs(df.global.world.crimes.all) do
-        -- If it's an Open Case (needs_trial = true) but someone was convicted (accused_hf.hfid ~= -1)
-        if crime.flags.needs_trial and crime.accused_hf and crime.accused_hf.hfid ~= -1 then
-            -- It's a ghost case where the unit was garbage collected but the historical figure was remembered!
-            crime.flags.needs_trial = false
-            crime.flags.sentenced = true
-            fixed_count = fixed_count + 1
+        -- If it's an Open Case but the accused unit has left the map / been garbage collected
+        if crime.flags.needs_trial and crime.accused ~= -1 then
+            local accused_unit = df.unit.find(crime.accused)
+            if not accused_unit or not dfhack.units.isActive(accused_unit) then
+                crime.flags.needs_trial = false
+                crime.flags.sentenced = true
+                fixed_count = fixed_count + 1
+            end
         end
     end
     if fixed_count > 0 then
@@ -537,9 +566,80 @@ function getHfIntrigueData(hf)
     return data
 end
 
+IntelReportScreen = defclass(IntelReportScreen, gui.FramedScreen)
+IntelReportScreen.ATTRS = {
+    frame_style = gui.FRAME_MEDIUM,
+    frame_title = "Intel Report",
+    frame_width = 85,
+    frame_height = 35,
+    frame_inset = 1,
+    report_text = "",
+}
+
+function IntelReportScreen:init()
+    self:addviews{
+        widgets.Label{
+            frame = {t = 0, l = 0, r = 0, b = 2},
+            text = self.report_text,
+            auto_height = false,
+            scroll_keys = {
+                UP = -1, DOWN = 1,
+                PAGE_UP = -10, PAGE_DOWN = 10,
+            },
+        },
+        widgets.HotkeyLabel{
+            frame = {b = 0, l = 0, w = 12},
+            key = 'LEAVESCREEN',
+            label = 'Close',
+            on_activate = function() self:dismiss() end,
+        },
+        widgets.HotkeyLabel{
+            frame = {b = 0, l = 15, w = 14},
+            key = 'CUSTOM_CTRL_C',
+            label = 'Copy',
+            on_activate = self:callback('copyReport'),
+        },
+        widgets.HotkeyLabel{
+            frame = {b = 0, l = 32, w = 11},
+            key = 'CUSTOM_C',
+            label = 'Export',
+            on_activate = self:callback('exportReport'),
+        },
+    }
+end
+
+function IntelReportScreen:copyReport()
+    local clipboard_text = self.report_text:gsub('\226\128\148', '--')
+    dfhack.internal.setClipboardTextCp437Multiline(clipboard_text)
+    dfhack.gui.showAnnouncement("CI-HQ: Intel Report copied to clipboard.", COLOR_LIGHTGREEN, true)
+end
+
+function IntelReportScreen:exportReport()
+    local export_path = dfhack.getHackPath() .. '/ci-hq-report.txt'
+    local f = io.open(export_path, 'wb')
+    if f then
+        f:write('\239\187\191')
+        f:write(self.report_text)
+        f:close()
+        dfhack.gui.showAnnouncement("CI-HQ: Report exported to " .. export_path, COLOR_LIGHTGREEN, true)
+    else
+        dfhack.gui.showAnnouncement("CI-HQ: Could not export report.", COLOR_RED, true)
+    end
+end
+
+function IntelReportScreen:onInput(keys)
+    if keys.LEAVESCREEN or keys._MOUSE_R then
+        self:dismiss()
+        return true
+    end
+    self.super.onInput(self, keys)
+end
+
 JusticeHQ = defclass(JusticeHQ, gui.ZScreen)
 JusticeHQ.ATTRS = {
     focus_path = 'justice-hq',
+    pass_movement_keys = false,
+    pass_mouse_clicks = false,
 }
 
 function JusticeHQ:init()
@@ -601,7 +701,7 @@ function JusticeHQ:init()
                 -- Tab Bar
                 widgets.TabBar{
                     frame = {t = 0, l = 0},
-                    labels = {'Suspects', 'Cases', 'Convicts', 'Network', 'Case File'},
+                    labels = {'Suspects', 'Cases', 'Warrants', 'Prisoners', 'Network', 'Dossier', 'Intel'},
                     on_select = function(idx)
                         PERSISTENT_UI.active_tab = idx
                         self.subviews.pages:setSelected(idx)
@@ -615,7 +715,7 @@ function JusticeHQ:init()
                 -- Pages
                 widgets.Pages{
                     view_id = 'pages',
-                    frame = {t = 3, l = 0, r = 0, b = 4},
+                    frame = {t = 3, l = 0, r = 0, b = 5},
                     subviews = {
                         -- PAGE 1: Suspect List (FilteredList, cards)
                         widgets.Panel{
@@ -655,24 +755,41 @@ function JusticeHQ:init()
                                 },
                             },
                         },
-                        -- PAGE 3: Active Convicts (FilteredList, cards)
+                        -- PAGE 3: Warrants (FilteredList, cards)
                         widgets.Panel{
                             frame = {t = 0, l = 0, r = 0, b = 0},
                             frame_style = gui.FRAME_INTERIOR,
-                            frame_title = 'Active Convicts',
+                            frame_title = 'Pending Warrants',
+                            subviews = {
+                                widgets.FilteredList{
+                                    view_id = 'warrants_list',
+                                    frame = {t = 0, l = 0, r = 0, b = 0},
+                                    row_height = 2,
+                                    choices = self:buildWarrantsChoices(),
+                                    edit_on_change = function(text) PERSISTENT_UI.search_text[3] = text end,
+                                    on_select = self:callback('onSelectWarrant'),
+                                    on_submit = self:callback('onSubmitWarrant'),
+                                },
+                            },
+                        },
+                        -- PAGE 4: Active Prisoners (FilteredList, cards)
+                        widgets.Panel{
+                            frame = {t = 0, l = 0, r = 0, b = 0},
+                            frame_style = gui.FRAME_INTERIOR,
+                            frame_title = 'Active Prisoners',
                             subviews = {
                                 widgets.FilteredList{
                                     view_id = 'convicts_list',
                                     frame = {t = 0, l = 0, r = 0, b = 0},
                                     row_height = 2,
                                     choices = self:buildConvictChoices(),
-                                    edit_on_change = function(text) PERSISTENT_UI.search_text[3] = text end,
+                                    edit_on_change = function(text) PERSISTENT_UI.search_text[4] = text end,
                                     on_select = self:callback('onSelectConvict'),
                                     on_submit = self:callback('onSubmitConvict'),
                                 },
                             },
                         },
-                        -- PAGE 4: Network Map (grouped list)
+                        -- PAGE 5: Network Map (grouped list)
                         widgets.Panel{
                             frame = {t = 0, l = 0, r = 0, b = 0},
                             frame_style = gui.FRAME_INTERIOR,
@@ -692,7 +809,7 @@ function JusticeHQ:init()
                                 },
                             },
                         },
-                        -- PAGE 5: Case File Dossier
+                        -- PAGE 6: Case File (Profile)
                         widgets.Panel{
                             frame = {t = 0, l = 0, r = 0, b = 0},
                             frame_style = gui.FRAME_INTERIOR,
@@ -706,11 +823,27 @@ function JusticeHQ:init()
                                 },
                             },
                         },
+                        -- PAGE 7: Intel Reports
+                        widgets.Panel{
+                            frame = {t = 0, l = 0, r = 0, b = 0},
+                            frame_style = gui.FRAME_INTERIOR,
+                            frame_title = 'Intel Reports',
+                            subviews = {
+                                widgets.FilteredList{
+                                    view_id = 'intel_list',
+                                    frame = {t = 0, l = 0, r = 0, b = 0},
+                                    row_height = 4,
+                                    choices = {},
+                                    edit_on_change = function(text) PERSISTENT_UI.search_text[7] = text end,
+                                    on_submit = self:callback('onSubmitIntelReport'),
+                                },
+                            },
+                        },
                     },
                 },
                 -- Bottom Controls
                 widgets.Panel{
-                    frame = {b = 0, l = 0, r = 0, h = 4},
+                    frame = {b = 0, l = 0, r = 0, h = 5},
                     frame_background = gui.CLEAR_PEN,
                     frame_style = gui.FRAME_MEDIUM,
                     subviews = {
@@ -724,6 +857,7 @@ function JusticeHQ:init()
                                 {label = 'High + Medium', value = 2, pen = COLOR_YELLOW},
                                 {label = 'All + Detained', value = 3, pen = COLOR_CYAN},
                                 {label = 'Everyone', value = 4, pen = COLOR_GREEN},
+                                {label = 'Convictable', value = 5, pen = COLOR_LIGHTMAGENTA},
                             },
                             initial_option = PERSISTENT_UI.filter_level or 1,
                             on_change = self:callback('onFilterChange'),
@@ -756,7 +890,7 @@ function JusticeHQ:init()
                             },
                             initial_option = PERSISTENT_UI.convict_filter_level or 1,
                             on_change = self:callback('onConvictsFilterChange'),
-                            visible = function() return self.subviews.pages:getSelected() == 3 end,
+                            visible = function() return self.subviews.pages:getSelected() == 4 end,
                         },
                         -- SORTS
                         widgets.CycleHotkeyLabel{
@@ -798,19 +932,25 @@ function JusticeHQ:init()
                             },
                             initial_option = PERSISTENT_UI.convicts_sort or 1,
                             on_change = self:callback('onConvictsFilterChange'),
-                            visible = function() return self.subviews.pages:getSelected() == 3 end,
+                            visible = function() return self.subviews.pages:getSelected() == 4 end,
                         },
-                        -- Network sort
+                        -- Network filter
                         widgets.CycleHotkeyLabel{
-                            view_id = 'network_sort',
+                            view_id = 'network_filter_cycle',
                             frame = {l = 0, t = 0},
-                            key = 'CUSTOM_F',
+                            key = 'CUSTOM_CTRL_F',
                             label = 'Show:',
                             options = {
-                                {label = 'All Networks', value = 1, pen = COLOR_WHITE},
+                                {label = 'Active Plots Only', value = 1, pen = COLOR_WHITE},
+                                {label = 'Large Networks', value = 2, pen = COLOR_WHITE},
+                                {label = 'All Networks', value = 3, pen = COLOR_WHITE},
                             },
-                            initial_option = 1,
-                            visible = function() return self.subviews.pages:getSelected() == 4 end,
+                            initial_option = PERSISTENT_UI.network_filter or 1,
+                            on_change = function(val)
+                                PERSISTENT_UI.network_filter = val
+                                self:rebuildActiveTab()
+                            end,
+                            visible = function() return self.subviews.pages:getSelected() == 5 end,
                         },
                         widgets.CycleHotkeyLabel{
                             view_id = 'network_sort_cycle',
@@ -826,7 +966,45 @@ function JusticeHQ:init()
                                 PERSISTENT_UI.network_sort = val
                                 self:rebuildActiveTab()
                             end,
-                            visible = function() return self.subviews.pages:getSelected() == 4 end,
+                            visible = function() return self.subviews.pages:getSelected() == 5 end,
+                        },
+                        -- Intel Reports filter
+                        widgets.CycleHotkeyLabel{
+                            view_id = 'intel_filter_cycle',
+                            frame = {l = 0, t = 0},
+                            key = 'CUSTOM_CTRL_F',
+                            label = 'Show:',
+                            options = {
+                                {label = 'Actionable Intel', value = 1, pen = COLOR_RED},
+                                {label = 'New Confessions', value = 2, pen = COLOR_YELLOW},
+                                {label = 'Refused / No Info', value = 3, pen = COLOR_DARKGREY},
+                                {label = 'All Reports', value = 4, pen = COLOR_GREEN},
+                            },
+                            initial_option = PERSISTENT_UI.intel_filter_level or 1,
+                            on_change = function(val)
+                                PERSISTENT_UI.intel_filter_level = val
+                                self:rebuildActiveTab()
+                            end,
+                            visible = function() return self.subviews.pages:getSelected() == 7 end,
+                        },
+                        widgets.CycleHotkeyLabel{
+                            view_id = 'intel_sort_cycle',
+                            frame = {l = 36, t = 0, w = 30},
+                            key = 'CUSTOM_CTRL_S',
+                            label = 'Sort:',
+                            options = {
+                                {label = 'Newest First', value = 1, pen = COLOR_WHITE},
+                                {label = 'Oldest First', value = 2, pen = COLOR_WHITE},
+                                {label = 'Subject Name', value = 3, pen = COLOR_WHITE},
+                                {label = 'Officer Name', value = 4, pen = COLOR_WHITE},
+                                {label = 'Most Intel', value = 5, pen = COLOR_WHITE},
+                            },
+                            initial_option = PERSISTENT_UI.intel_sort or 1,
+                            on_change = function(val)
+                                PERSISTENT_UI.intel_sort = val
+                                self:rebuildActiveTab()
+                            end,
+                            visible = function() return self.subviews.pages:getSelected() == 7 end,
                         },
                         -- ACTIONS
                         widgets.HotkeyLabel{
@@ -838,6 +1016,16 @@ function JusticeHQ:init()
                             disabled = false,
                             visible = true,
                             on_activate = self:callback('onInterrogate'),
+                        },
+                        widgets.HotkeyLabel{
+                            frame = {l = 0, t = 2, w = 15},
+                            key = 'SELECT',
+                            label = 'Convict',
+                            text_pen = COLOR_LIGHTRED,
+                            visible = function()
+                                return self.selected_suspect and isConvictable(self.selected_suspect)
+                            end,
+                            on_activate = self:callback('onConvict'),
                         },
                         widgets.HotkeyLabel{
                             frame = {l = 16, t = 1, w = 11},
@@ -903,11 +1091,10 @@ function JusticeHQ:init()
         },
     }
     
-    if self.selected_suspect then
-        self.subviews.pages:setSelected(5)
+    self.subviews.pages:setSelected(PERSISTENT_UI.active_tab or 1)
+    if PERSISTENT_UI.active_tab == 6 and self.selected_suspect then
         self:onOpenCaseFile(nil, {data = self.selected_suspect})
     else
-        self.subviews.pages:setSelected(PERSISTENT_UI.active_tab or 1)
         self:rebuildActiveTab()
     end
     self.init_complete = true
@@ -1000,7 +1187,7 @@ function JusticeHQ:buildEvidence(s)
             if crime.flags.sentenced then
                 status_text = " [Closed/Sentenced]"
                 pts = 0
-                color = COLOR_DARKGRAY
+                color = COLOR_DARKGREY
             elseif crime.flags.needs_trial then
                 status_text = " [Open Case]"
                 pts = pts + 50
@@ -1221,6 +1408,7 @@ function JusticeHQ:buildChoices()
         if self.filter_level == 2 and (s.threat == 'High' or s.threat == 'Medium') and not detained then show = true end
         if self.filter_level == 3 and (s.threat == 'High' or s.threat == 'Medium') then show = true end
         if self.filter_level == 4 then show = true end
+        if self.filter_level == 5 and isConvictable(s) then show = true end
 
         if show then
             rank = rank + 1
@@ -1288,16 +1476,19 @@ function JusticeHQ:buildChoices()
                 {text = string.format("%-40s", s.first_name .. ", " .. s.prof), pen = COLOR_WHITE},
                 {text = string.format("%2s  ", s.gender), pen = COLOR_GREY},
                 {text = cat_badge, pen = badge_color},
-                NEWLINE,
-                {text = "   Threat: ", pen = COLOR_GREY},
-                {text = string.upper(s.threat), pen = threat_color},
-                {text = string.format(" [%d pts]                     ", s.score), pen = COLOR_GREY},
-                {text = (earliest_year and ("Y." .. earliest_year) or ""), pen = COLOR_GREY},
-                NEWLINE,
-                {text = string.format("   %-35s", crimes_summary), pen = COLOR_DARKGREY},
-                {text = top_strategy ~= "" and top_strategy or "", pen = top_strategy == "Assassinate" and COLOR_LIGHTRED or COLOR_YELLOW},
-                {text = cell_str ~= "" and ("  " .. cell_str) or "", pen = COLOR_DARKGREY},
             }
+            if isConvictable(s) then
+                table.insert(text_arr, {text = "  [CONVICTABLE]", pen = COLOR_LIGHTRED})
+            end
+            table.insert(text_arr, NEWLINE)
+            table.insert(text_arr, {text = "   Threat: ", pen = COLOR_GREY})
+            table.insert(text_arr, {text = string.upper(s.threat), pen = threat_color})
+            table.insert(text_arr, {text = string.format(" [%d pts]                     ", s.score), pen = COLOR_GREY})
+            table.insert(text_arr, {text = (earliest_year and ("Y." .. earliest_year) or ""), pen = COLOR_GREY})
+            table.insert(text_arr, NEWLINE)
+            table.insert(text_arr, {text = string.format("   %-35s", crimes_summary), pen = COLOR_DARKGREY})
+            table.insert(text_arr, {text = top_strategy ~= "" and top_strategy or "", pen = top_strategy == "Assassinate" and COLOR_LIGHTRED or COLOR_YELLOW})
+            table.insert(text_arr, {text = cell_str ~= "" and ("  " .. cell_str) or "", pen = COLOR_DARKGREY})
             local searchable = string.lower(s.name .. " " .. s.prof .. " " .. crimes_summary)
             table.insert(list_choices, {
                 text = text_arr,
@@ -1363,20 +1554,448 @@ function JusticeHQ:onSearchChange(text)
     -- Remove manual search logic; FilteredList handles it natively.
 end
 
+function JusticeHQ:setListChoices(list_view, choices, id_func)
+    local selected_idx = 1
+    if GLOBAL_SELECTED_SUSPECT_ID then
+        for i, choice in ipairs(choices) do
+            local uid
+            if id_func then uid = id_func(choice)
+            elseif choice.data and choice.data.unit then uid = choice.data.unit.id
+            elseif choice.data and choice.data.accused then uid = choice.data.accused
+            end
+            if uid == GLOBAL_SELECTED_SUSPECT_ID then
+                selected_idx = i
+                break
+            end
+        end
+    end
+    self.rebuilding_tab = true
+    list_view:setChoices(choices, selected_idx)
+    self.rebuilding_tab = false
+end
+
 function JusticeHQ:rebuildActiveTab()
     local page = self.subviews.pages:getSelected()
     if page == 1 then
-        self.subviews.suspect_list:setChoices(self:buildChoices())
+        self:setListChoices(self.subviews.suspect_list, self:buildChoices())
         if PERSISTENT_UI.search_text[1] then self.subviews.suspect_list:setFilter(PERSISTENT_UI.search_text[1]) end
     elseif page == 2 then
-        self.subviews.cases_list:setChoices(self:buildCaseChoices())
+        initCrimeCache()  -- Refresh crime cache so new crimes appear
+        self:setListChoices(self.subviews.cases_list, self:buildCaseChoices())
         if PERSISTENT_UI.search_text[2] then self.subviews.cases_list:setFilter(PERSISTENT_UI.search_text[2]) end
     elseif page == 3 then
-        self.subviews.convicts_list:setChoices(self:buildConvictChoices())
-        if PERSISTENT_UI.search_text[3] then self.subviews.convicts_list:setFilter(PERSISTENT_UI.search_text[3]) end
+        initCrimeCache()  -- Refresh crime cache so new warrants appear
+        self:setListChoices(self.subviews.warrants_list, self:buildWarrantsChoices())
+        if PERSISTENT_UI.search_text[3] then self.subviews.warrants_list:setFilter(PERSISTENT_UI.search_text[3]) end
     elseif page == 4 then
-        self.subviews.network_list:setChoices(self:buildNetworkChoices())
+        self:setListChoices(self.subviews.convicts_list, self:buildConvictChoices())
+        if PERSISTENT_UI.search_text[4] then self.subviews.convicts_list:setFilter(PERSISTENT_UI.search_text[4]) end
+    elseif page == 5 then
+        self:setListChoices(self.subviews.network_list, self:buildNetworkChoices())
+    elseif page == 6 then
+        -- Case File tab: content is populated by onOpenCaseFile, not rebuilt on tab switch.
+        -- If no suspect is selected, show guidance.
+        if not self.selected_suspect then
+            local case_file = self.subviews.case_file
+            if case_file then
+                case_file:setText({{text = '  Select a suspect and press Enter to open their dossier.', pen = COLOR_GREY}})
+                if case_file.frame_body then case_file:updateLayout() end
+            end
+        else
+            self:refreshCurrentDossier()
+        end
+    elseif page == 7 then
+        local ok, result = pcall(function() return self:buildIntelChoices() end)
+        if not ok then
+            dfhack.printerr("Error in buildIntelChoices: " .. tostring(result))
+            self.subviews.intel_list:setChoices({{text = "ERROR: " .. tostring(result)}})
+        else
+            self.subviews.intel_list:setChoices(result)
+            if PERSISTENT_UI.search_text[7] then self.subviews.intel_list:setFilter(PERSISTENT_UI.search_text[7]) end
+        end
     end
+end
+
+-- ===========================
+-- Intel Reports Tab
+-- ===========================
+
+local INTEL_SEASONS = {'Spring', 'Summer', 'Autumn', 'Winter'}
+local INTEL_METHOD_NAMES = {}
+do
+    local ok, imt = pcall(function() return df.interrogation_method_type end)
+    if ok and imt then
+        INTEL_METHOD_NAMES[imt.INTIMIDATE] = 'Intimidation'
+        INTEL_METHOD_NAMES[imt.FLATTER] = 'Flattery'
+        INTEL_METHOD_NAMES[imt.RELIGIOUS_SYMPATHY] = 'Religious Sympathy'
+        INTEL_METHOD_NAMES[imt.APPEAL_TO_VALUE] = 'Appeal to Values'
+        INTEL_METHOD_NAMES[imt.BUILD_RAPPORT] = 'Build Rapport'
+        INTEL_METHOD_NAMES[imt.LIE] = 'Deception'
+    else
+        -- Fallback: numeric enum values (from df.d_basics.xml)
+        INTEL_METHOD_NAMES[0] = 'Intimidation'
+        INTEL_METHOD_NAMES[1] = 'Flattery'
+        INTEL_METHOD_NAMES[2] = 'Religious Sympathy'
+        INTEL_METHOD_NAMES[3] = 'Appeal to Values'
+        INTEL_METHOD_NAMES[4] = 'Build Rapport'
+        INTEL_METHOD_NAMES[5] = 'Deception'
+    end
+end
+
+local function intelTickToSeason(tick)
+    if not tick or tick < 0 then return '???' end
+    return INTEL_SEASONS[math.floor(tick / 100800) % 4 + 1] or '???'
+end
+
+local function resolveHFName(hfid)
+    if not hfid or hfid < 0 then return 'Unknown', '' end
+    local hf = df.historical_figure.find(hfid)
+    if not hf then return 'Unknown', '' end
+    local name = 'Unknown'
+    pcall(function()
+        name = dfhack.translation.translateName(hf.name)
+        if name == '' then name = dfhack.translation.translateName(hf.name, true) end
+    end)
+    local unit = hf.unit_id >= 0 and df.unit.find(hf.unit_id) or nil
+    local occ = unit and dfhack.units.getProfessionName(unit) or ''
+    return name, occ
+end
+
+local function computeIntelOutcome(report)
+    local has_confessions = #report.confessed_target_crime_id > 0
+    local has_identities = #report.confessed_identity_id > 0
+    local has_agreements = #report.revealed_agreement_id > 0
+    local has_events = #report.revealed_event_id > 0
+    local successful = false
+    pcall(function() successful = report.intcr.flags.successful end)
+
+    if successful and (has_confessions or has_identities) then
+        return 'CONFESSED', COLOR_GREEN
+    elseif successful and (has_agreements or has_events) then
+        return 'NEW INTEL', COLOR_CYAN
+    elseif not successful then
+        return 'REFUSED', COLOR_LIGHTRED
+    else
+        return 'NO NEW INFO', COLOR_DARKGREY
+    end
+end
+
+function JusticeHQ:buildIntelChoices()
+    local list_choices = {}
+    local filter = PERSISTENT_UI.intel_filter_level or 1
+    local sort_mode = PERSISTENT_UI.intel_sort or 1
+
+    -- Read the global interrogation reports store
+    local reports = df.global.world.status.interrogation_reports
+    -- (debug line removed for release)
+
+    -- Build raw entries
+    local entries = {}
+    if reports then
+        for i = 0, #reports - 1 do
+        local report = reports[i]
+        if report then
+            local subject_name, subject_occ = resolveHFName(report.subject_hf)
+            local outcome_label, outcome_color = computeIntelOutcome(report)
+            local is_unread = not report.flags.viewed
+            local has_confessions = #report.confessed_target_crime_id > 0
+            local has_identities = #report.confessed_identity_id > 0
+            local has_agreements = #report.revealed_agreement_id > 0
+            local has_events = #report.revealed_event_id > 0
+            local intel_count = #report.confessed_target_crime_id + #report.confessed_identity_id + #report.revealed_agreement_id + #report.revealed_event_id
+            local method_name = 'Unknown'
+            pcall(function() method_name = INTEL_METHOD_NAMES[report.intcr.method] or 'Unknown' end)
+            local season_str = intelTickToSeason(report.tick)
+            local officer_str = report.officer_name or 'Unknown'
+
+            -- Filter logic
+            local include = false
+            if filter == 4 then
+                include = true
+            elseif filter == 1 then
+                -- Actionable Intel: unread OR has confessions/identities/agreements
+                include = is_unread or has_confessions or has_identities or has_agreements
+            elseif filter == 2 then
+                -- New Confessions only
+                include = has_confessions or has_identities or has_agreements
+            elseif filter == 3 then
+                -- Refused / No Info
+                local intcr_ok, intcr_succ = pcall(function() return report.intcr.flags.successful end)
+                include = (intcr_ok and not intcr_succ) or (intcr_ok and intcr_succ and intel_count == 0)
+            end
+
+            if include then
+                table.insert(entries, {
+                    report = report,
+                    subject_name = subject_name,
+                    subject_occ = subject_occ,
+                    officer_str = officer_str,
+                    outcome_label = outcome_label,
+                    outcome_color = outcome_color,
+                    is_unread = is_unread,
+                    method_name = method_name,
+                    season_str = season_str,
+                    year = report.year or 0,
+                    tick = report.tick or 0,
+                    intel_count = intel_count,
+                    has_confessions = has_confessions,
+                    has_identities = has_identities,
+                    has_agreements = has_agreements,
+                })
+            end
+        end
+        end
+    end
+
+    -- Sort
+    if sort_mode == 1 then
+        -- Newest First
+        table.sort(entries, function(a, b)
+            if a.year ~= b.year then return a.year > b.year end
+            return a.tick > b.tick
+        end)
+    elseif sort_mode == 2 then
+        -- Oldest First
+        table.sort(entries, function(a, b)
+            if a.year ~= b.year then return a.year < b.year end
+            return a.tick < b.tick
+        end)
+    elseif sort_mode == 3 then
+        -- Subject Name
+        table.sort(entries, function(a, b) return a.subject_name < b.subject_name end)
+    elseif sort_mode == 4 then
+        -- Officer Name
+        table.sort(entries, function(a, b) return a.officer_str < b.officer_str end)
+    elseif sort_mode == 5 then
+        -- Most Intel
+        table.sort(entries, function(a, b) return a.intel_count > b.intel_count end)
+    end
+
+    -- Build choices
+    for _, e in ipairs(entries) do
+        local line1_parts = {}
+        if e.is_unread then
+            table.insert(line1_parts, {text = string.char(15) .. ' UNREAD  ', pen = COLOR_YELLOW})
+        end
+        table.insert(line1_parts, {text = e.subject_name, pen = COLOR_WHITE})
+        if e.subject_occ ~= '' then
+            table.insert(line1_parts, {text = ', ' .. e.subject_occ, pen = COLOR_GREY})
+        end
+        table.insert(line1_parts, {text = ', ' .. e.season_str .. ' ' .. e.year, pen = COLOR_GREY})
+
+        local confession_summary = ''
+        if e.has_confessions then
+            confession_summary = confession_summary .. #e.report.confessed_target_crime_id .. ' crimes'
+        end
+        if e.has_identities then
+            if confession_summary ~= '' then confession_summary = confession_summary .. ', ' end
+            confession_summary = confession_summary .. #e.report.confessed_identity_id .. ' identities'
+        end
+        if e.has_agreements then
+            if confession_summary ~= '' then confession_summary = confession_summary .. ', ' end
+            confession_summary = confession_summary .. #e.report.revealed_agreement_id .. ' plots'
+        end
+        if e.has_events then
+            if confession_summary ~= '' then confession_summary = confession_summary .. ', ' end
+            confession_summary = confession_summary .. #e.report.revealed_event_id .. ' events'
+        end
+        if confession_summary == '' then
+            confession_summary = 'No new information'
+        end
+
+        local text_arr = {}
+        for _, p in ipairs(line1_parts) do table.insert(text_arr, p) end
+        table.insert(text_arr, NEWLINE)
+        table.insert(text_arr, {text = '   Officer: ', pen = COLOR_GREY})
+        table.insert(text_arr, {text = e.officer_str, pen = COLOR_WHITE})
+        table.insert(text_arr, NEWLINE)
+        table.insert(text_arr, {text = '   ', pen = COLOR_GREY})
+        table.insert(text_arr, {text = e.outcome_label, pen = e.outcome_color})
+        table.insert(text_arr, {text = '  ' .. e.method_name .. '  |  ' .. confession_summary, pen = COLOR_DARKGREY})
+        table.insert(text_arr, NEWLINE)
+
+        local searchable = string.lower(e.subject_name .. ' ' .. e.subject_occ .. ' ' .. e.officer_str .. ' ' .. e.outcome_label)
+        table.insert(list_choices, {
+            text = text_arr,
+            search_key = searchable,
+            data = e,
+        })
+    end
+
+    if #list_choices == 0 then
+        local empty_msg = 'No intel reports at this filter level.'
+        if filter == 1 then
+            empty_msg = 'No actionable intel. Interrogate suspects to generate reports.'
+        end
+        table.insert(list_choices, {
+            text = {{text = '  ' .. empty_msg, pen = COLOR_GREY}},
+            search_key = '',
+            data = nil,
+        })
+    end
+
+    return list_choices
+end
+
+local function wordWrap(text, max_width)
+    local lines = {}
+    for line in text:gmatch("([^\n]*)\n?") do
+        if line == "" then
+            table.insert(lines, "")
+        else
+            local indent = line:match("^(%s*)")
+            local current_line = ""
+            for word in line:gmatch("%S+") do
+                if #current_line == 0 then
+                    current_line = indent .. word
+                elseif #current_line + 1 + #word > max_width then
+                    table.insert(lines, current_line)
+                    current_line = indent .. word
+                else
+                    current_line = current_line .. " " .. word
+                end
+            end
+            if #current_line > 0 then
+                table.insert(lines, current_line)
+            end
+        end
+    end
+    return lines
+end
+
+function JusticeHQ:onSubmitIntelReport(idx, choice)
+    if not choice or not choice.data then return end
+    local e = choice.data
+    local report = e.report
+    if not report then return end
+
+    -- Gather full detail text
+    local detail_lines = {}
+    table.insert(detail_lines, "    " .. (report.title or 'Interrogation Report'))
+    table.insert(detail_lines, "    " .. (report.officer_name or ''))
+    table.insert(detail_lines, "")
+
+    if report.details then
+        for i = 0, #report.details - 1 do
+            local str_ptr = report.details[i]
+            if str_ptr then
+                local line = type(str_ptr) == 'string' and str_ptr or tostring(str_ptr.value or str_ptr)
+                table.insert(detail_lines, "    " .. line)
+                if i < #report.details - 1 then
+                    table.insert(detail_lines, "")
+                end
+            end
+        end
+    end
+
+    if #detail_lines <= 3 then
+        table.insert(detail_lines, "    Outcome: " .. e.outcome_label)
+        table.insert(detail_lines, "    Method: " .. e.method_name)
+        if e.has_confessions then
+            table.insert(detail_lines, "    Confessed to " .. #report.confessed_target_crime_id .. " crime(s)")
+        end
+        if e.has_identities then
+            table.insert(detail_lines, "    Revealed " .. #report.confessed_identity_id .. " identity/identities")
+        end
+        if e.has_agreements then
+            table.insert(detail_lines, "    Exposed " .. #report.revealed_agreement_id .. " plot(s)")
+        end
+        if e.has_events then
+            table.insert(detail_lines, "    Revealed " .. #report.revealed_event_id .. " event(s)")
+        end
+    end
+
+    local full_text = table.concat(detail_lines, '\n')
+    local wrapped_lines = wordWrap(full_text, 75)
+    local wrapped_text = table.concat(wrapped_lines, '\n')
+
+    -- Mark as read
+    report.flags.viewed = true
+
+    IntelReportScreen{
+        frame_title = 'Intel Report: ' .. e.subject_name,
+        report_text = wrapped_text,
+    }:show()
+    
+    -- Rebuild the tab behind the scenes so the unread counter updates
+    self:rebuildActiveTab()
+end
+
+-- ===========================
+-- Build Warrants List
+-- ===========================
+
+function JusticeHQ:buildWarrantsChoices()
+    local list_choices = {}
+
+    local scored = {}
+    for _, s in ipairs(self.suspects) do
+        if isConvictable(s) then
+            if not s.evidence then
+                local evidence, score = self:buildEvidence(s)
+                s.evidence = evidence
+                s.score = score
+            end
+            table.insert(scored, s)
+        end
+    end
+
+    table.sort(scored, function(a, b) return a.score > b.score end)
+
+    local rank = 0
+    for _, s in ipairs(scored) do
+        rank = rank + 1
+
+        local threat_color = COLOR_DARKGREY
+        if s.threat == 'High' then threat_color = COLOR_LIGHTRED
+        elseif s.threat == 'Medium' then threat_color = COLOR_YELLOW end
+        
+        local cat_badge = string.upper(s.category)
+        local badge_color = COLOR_DARKGREY
+        if s.category == 'visitor' then badge_color = COLOR_LIGHTCYAN
+        elseif s.category == 'resident' then badge_color = COLOR_CYAN end
+
+        local open_crimes = getOpenCrimes(s.unit.hist_figure_id)
+        local crime_names = {}
+        local added_crimes = {}
+        for _, c in ipairs(open_crimes) do
+            local cname = getCrimeName(c.mode)
+            if not added_crimes[cname] then
+                table.insert(crime_names, cname)
+                added_crimes[cname] = true
+            end
+        end
+        local crime_str = table.concat(crime_names, ", ")
+        if crime_str == "" then crime_str = "Unknown" end
+        if #crime_str > 26 then crime_str = string.sub(crime_str, 1, 23) .. "..." end
+
+        local text_blocks = {
+            {text = string.format("%3d ", rank), pen = COLOR_DARKGREY},
+            {text = string.format("%-22s", string.sub(s.short_name, 1, 22)), pen = COLOR_WHITE},
+            {text = " [", pen = COLOR_DARKGREY},
+            {text = string.format("%-8s", cat_badge), pen = badge_color},
+            {text = "] ", pen = COLOR_DARKGREY},
+            {text = "Wanted: ", pen = COLOR_LIGHTRED},
+            {text = string.format("%-26s", crime_str), pen = COLOR_YELLOW},
+            {text = string.format(" [%d pts]", s.score), pen = COLOR_GREY},
+        }
+
+        table.insert(list_choices, {
+            text = text_blocks,
+            search_key = s.name:lower() .. ' ' .. s.prof:lower() .. ' ' .. s.category:lower(),
+            data = s,
+        })
+    end
+
+    if #list_choices == 0 then
+        table.insert(list_choices, {
+            text = {{text = '  No pending warrants.', pen = COLOR_GREY}},
+            search_key = '',
+            data = nil,
+        })
+    end
+
+    return list_choices
 end
 
 -- ===========================
@@ -1412,19 +2031,23 @@ function JusticeHQ:buildCaseChoices()
             
             local details = {}
             local accused_name = "Unknown"
-            if crime.accused ~= -1 then
-                local hf = df.historical_figure.find(crime.accused)
-                if hf then 
-                    accused_name = dfhack.units.getReadableName(hf)
+            if crime.accused_hf and crime.accused_hf.hfid ~= -1 then
+                local hf = df.historical_figure.find(crime.accused_hf.hfid)
+                if hf then
+                    local aunit = hf.unit_id >= 0 and df.unit.find(hf.unit_id) or nil
+                    accused_name = aunit and dfhack.units.getReadableName(aunit) or dfhack.translation.translateName(hf.name)
+                    if accused_name == '' then accused_name = dfhack.translation.translateName(hf.name, true) end
                     table.insert(details, "Accused: " .. accused_name)
                 end
             end
             
             local victim_name = "Unknown"
-            if crime.victim ~= -1 then
-                local hf = df.historical_figure.find(crime.victim)
-                if hf then 
-                    victim_name = dfhack.units.getReadableName(hf)
+            if crime.victim_hf and crime.victim_hf.hfid ~= -1 then
+                local hf = df.historical_figure.find(crime.victim_hf.hfid)
+                if hf then
+                    local vunit = hf.unit_id >= 0 and df.unit.find(hf.unit_id) or nil
+                    victim_name = vunit and dfhack.units.getReadableName(vunit) or dfhack.translation.translateName(hf.name)
+                    if victim_name == '' then victim_name = dfhack.translation.translateName(hf.name, true) end
                     table.insert(details, "Victim: " .. victim_name)
                 end
             end
@@ -1764,9 +2387,12 @@ function JusticeHQ:buildPOICard(poi)
             local event = events[i]
             if event.year < df.global.cur_year - 5 then break end
             if df.history_event_hf_interrogatedst:is_instance(event) then
-                if event.target_hf == hf.id then
-                    implicated_count = implicated_count + #event.implicated_hfs
-                end
+                pcall(function()
+                    local evt_hf = event.target_hf or event.subject_hf
+                    if evt_hf == hf.id then
+                        implicated_count = implicated_count + #event.implicated_hfs
+                    end
+                end)
             end
         end
     end
@@ -1952,10 +2578,21 @@ function JusticeHQ:buildNetworkChoices()
         end
     end
     
-    -- Sort villain networks into an ordered list
+    -- Sort and filter villain networks
     local sorted_networks = {}
+    local filter_mode = PERSISTENT_UI.network_filter or 1
     for hf_id, network in pairs(villain_networks) do
-        table.insert(sorted_networks, network)
+        local include = false
+        if filter_mode == 3 then
+            include = true
+        elseif filter_mode == 1 then
+            include = network.plot_count > 0
+        elseif filter_mode == 2 then
+            include = #network.actors >= 3
+        end
+        if include then
+            table.insert(sorted_networks, network)
+        end
     end
     local sort_mode = self.subviews.network_sort_cycle and self.subviews.network_sort_cycle:getOptionValue() or 1
     if sort_mode == 1 then
@@ -2004,10 +2641,11 @@ function JusticeHQ:buildNetworkChoices()
             elseif actor.hf_1 ~= -1 then
                 local target_hf = df.historical_figure.find(actor.hf_1)
                 if target_hf then
-                    pcall(function() target_name = dfhack.units.getReadableName(df.unit.find(target_hf.unit_id)) end)
-                    if target_name == "Unknown" then
-                        pcall(function() target_name = dfhack.translation.translateName(target_hf.name) end)
-                    end
+                    pcall(function() 
+                        target_name = dfhack.translation.translateName(target_hf.name)
+                        if target_name == "" then target_name = dfhack.translation.translateName(target_hf.name, true) end
+                    end)
+                    if not target_name or target_name == "" then target_name = "Unknown" end
                 end
             end
             
@@ -2023,7 +2661,7 @@ function JusticeHQ:buildNetworkChoices()
             end
             
             local text_arr = {
-                {text = string.format("   %s %-30s", string.char(16), target_name), pen = COLOR_WHITE},
+                {text = string.format("   %s %-32s ", string.char(16), target_name), pen = COLOR_WHITE},
                 {text = string.format("%-22s ", role_display), pen = COLOR_LIGHTRED},
                 {text = cat_badge, pen = badge_color},
                 NEWLINE,
@@ -2032,6 +2670,11 @@ function JusticeHQ:buildNetworkChoices()
             -- Investigation progress markers
             local marker_added = false
             if target_s then
+                if isConvictable(target_s) then
+                    table.insert(text_arr, {text = "  [CONVICTABLE]", pen = COLOR_LIGHTRED})
+                    marker_added = true
+                end
+                
                 local watch = interrogation_watchlist[target_s.unit.id]
                 if watch then
                     local status_tag = ""
@@ -2112,7 +2755,7 @@ end
 
 function JusticeHQ:onSelectSuspect(idx, choice)
     -- Don't let auto-select during init overwrite the saved suspect
-    if not self.init_complete and GLOBAL_SELECTED_SUSPECT_ID then return end
+    if (not self.init_complete or self.rebuilding_tab) and GLOBAL_SELECTED_SUSPECT_ID then return end
     if not choice or not choice.data then
         self.selected_suspect = nil
         GLOBAL_SELECTED_SUSPECT_ID = nil
@@ -2129,37 +2772,65 @@ function JusticeHQ:onSubmitSuspect(idx, choice)
     end
 end
 
+function JusticeHQ:onSelectWarrant(idx, choice)
+    self:onSelectSuspect(idx, choice)
+end
+
+function JusticeHQ:onSubmitWarrant(idx, choice)
+    self:onSelectSuspect(idx, choice)
+    if self.selected_suspect then
+        self:onOpenCaseFile(idx, choice)
+    end
+end
+
 function JusticeHQ:onSelectCase(idx, choice)
+    -- Don't let auto-select during init overwrite the saved suspect
+    if (not self.init_complete or self.rebuilding_tab) and GLOBAL_SELECTED_SUSPECT_ID then return end
+    
     -- Cases store a crime object in choice.data
     -- We try to find the accused unit and set them as selected_suspect
     if not choice or not choice.data then return end
     local crime = choice.data
-    if crime.accused and crime.accused ~= -1 then
-        local hf = df.historical_figure.find(crime.accused)
-        if hf then
-            -- Find the unit in the world
-            for _, unit in ipairs(df.global.world.units.active) do
-                if unit.hist_figure_id == hf.id then
-                    -- Build a minimal suspect wrapper
-                    self.selected_suspect = {
-                        unit = unit,
-                        first_name = dfhack.units.getReadableName(unit),
-                        name = dfhack.units.getReadableName(unit),
-                        prof = dfhack.units.getProfessionName(unit),
-                        race = dfhack.units.getRaceName(unit),
-                        gender = "",
-                        threat = "Medium",
-                        category = dfhack.units.isCitizen(unit) and "citizen" or "visitor",
-                        score = 0,
-                        crime_data = getUnitCrimeData(unit),
-                    }
-                    local evidence, score = self:buildEvidence(self.selected_suspect)
-                    self.selected_suspect.evidence = evidence
-                    self.selected_suspect.score = score
-                    GLOBAL_SELECTED_SUSPECT_ID = self.selected_suspect.unit.id
-                    return
-                end
+    if crime.accused ~= -1 then
+        -- Try to find the unit directly by unit ID first
+        local unit = df.unit.find(crime.accused)
+        -- Fallback: find via HF ID
+        if not unit and crime.accused_hf and crime.accused_hf.hfid ~= -1 then
+            local hf = df.historical_figure.find(crime.accused_hf.hfid)
+            if hf and hf.unit_id >= 0 then
+                unit = df.unit.find(hf.unit_id)
             end
+        end
+        if unit and dfhack.units.isActive(unit) then
+            local race_name = 'unknown'
+            pcall(function()
+                local raw = df.creature_raw.find(unit.race)
+                if raw then race_name = raw.name[0] end
+            end)
+            local gender = ''
+            if unit.sex == 0 then gender = string.char(12)
+            elseif unit.sex == 1 then gender = string.char(11) end
+            local full_name = dfhack.units.getReadableName(unit)
+            local first_name = full_name:match('^(%S+)') or full_name
+            self.selected_suspect = {
+                unit = unit,
+                first_name = first_name,
+                name = full_name,
+                short_name = first_name .. ' (' .. race_name .. ')',
+                prof = dfhack.units.getProfessionName(unit),
+                race = race_name,
+                gender = gender,
+                threat = 'Medium',
+                reason_lines = {'Accused of a crime.'},
+                category = dfhack.units.isCitizen(unit) and 'citizen' or (dfhack.units.isVisiting(unit) and 'visitor' or 'resident'),
+                score = 0,
+                crime_data = getUnitCrimeData(unit),
+            }
+            local evidence, score = self:buildEvidence(self.selected_suspect)
+            self.selected_suspect.evidence = evidence
+            self.selected_suspect.score = score
+            GLOBAL_SELECTED_SUSPECT_ID = self.selected_suspect.unit.id
+            return
         end
     end
 end
@@ -2174,7 +2845,7 @@ function JusticeHQ:onSubmitCase(idx, choice)
 end
 
 function JusticeHQ:onSelectConvict(idx, choice)
-    if not self.init_complete and GLOBAL_SELECTED_SUSPECT_ID then return end
+    if (not self.init_complete or self.rebuilding_tab) and GLOBAL_SELECTED_SUSPECT_ID then return end
     if not choice or not choice.data then
         self.selected_suspect = nil
         GLOBAL_SELECTED_SUSPECT_ID = nil
@@ -2192,7 +2863,7 @@ function JusticeHQ:onSubmitConvict(idx, choice)
 end
 
 function JusticeHQ:onSelectNetwork(idx, choice)
-    if not self.init_complete and GLOBAL_SELECTED_SUSPECT_ID then return end
+    if (not self.init_complete or self.rebuilding_tab) and GLOBAL_SELECTED_SUSPECT_ID then return end
     if not choice or not choice.data then
         self.selected_suspect = nil
         GLOBAL_SELECTED_SUSPECT_ID = nil
@@ -2492,7 +3163,9 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
             local event = events[i]
             if event.year < df.global.cur_year - 5 then break end
             if df.history_event_hf_interrogatedst:is_instance(event) then
-                if event.target_hf == hf.id then
+                local evt_hf = nil
+                pcall(function() evt_hf = event.target_hf or event.subject_hf end)
+                if evt_hf == hf.id then
                     table.insert(reports, event)
                 end
             end
@@ -2509,8 +3182,8 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
             for _, report in ipairs(reports) do
                 local interrogator_name = "Unknown"
                 pcall(function()
-                    local int_hf = df.historical_figure.find(report.interrogator_hf)
-                    if int_hf then interrogator_name = dfhack.units.getReadableName(int_hf) end
+                    local int_hf = df.historical_figure.find(report.officer_hf)
+                    if int_hf then interrogator_name = dfhack.translation.translateName(int_hf.name) end
                 end)
                 local season = ""
                 local ticks = report.seconds or 0
@@ -2548,7 +3221,7 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
             case_file:updateLayout()
         end
     end
-    self.subviews.pages:setSelected(5)
+    self.subviews.pages:setSelected(6)
 end
 
 function JusticeHQ:gatherSuspects()
@@ -2698,7 +3371,7 @@ function JusticeHQ:refreshCurrentDossier()
         for idx, choice in ipairs(list:getChoices()) do
             if choice.data and choice.data.unit.id == uid then
                 self.selected_suspect = choice.data
-                if self.subviews.pages:getSelected() == 5 then
+                if self.subviews.pages:getSelected() == 6 then
                     self:onOpenCaseFile(idx, choice)
                 end
                 return
@@ -2712,7 +3385,7 @@ function JusticeHQ:refreshCurrentDossier()
         for idx, choice in ipairs(clist:getChoices()) do
             if choice.data and choice.data.unit.id == uid then
                 self.selected_suspect = choice.data
-                if self.subviews.pages:getSelected() == 5 then
+                if self.subviews.pages:getSelected() == 6 then
                     self:onOpenCaseFile(idx, choice)
                 end
                 return
@@ -2873,8 +3546,9 @@ function JusticeHQ:serializeCurrentTab()
     local list_map = {
         [1] = {name = "Suspects", view = 'suspect_list'},
         [2] = {name = "Cases", view = 'cases_list'},
-        [3] = {name = "Convicts", view = 'convicts_list'},
-        [4] = {name = "Network", view = 'network_list'},
+        [3] = {name = "Warrants", view = 'warrants_list'},
+        [4] = {name = "Prisoners", view = 'convicts_list'},
+        [5] = {name = "Network", view = 'network_list'},
     }
     
     if list_map[page] then
@@ -2890,11 +3564,39 @@ function JusticeHQ:serializeCurrentTab()
                 end
             end
         end
-    elseif page == 5 then
+    elseif page == 6 then
         tab_name = "Case File"
         local case_file = self.subviews.case_file
         if case_file and case_file.text then
             lines = self:serializeLabelTokens(case_file.text)
+        end
+    elseif page == 7 then
+        tab_name = "Intel Report"
+        local list = self.subviews.intel_list and self.subviews.intel_list.list
+        if list then
+            local idx, choice = list:getSelected()
+            if choice and choice.data and choice.data.report then
+                local r = choice.data.report
+                local hf = df.historical_figure.find(r.subject_hf)
+                local name = hf and dfhack.translation.translateName(hf.name) or "Unknown"
+                local date_str = dfDateString(r.year, r.tick)
+                local title = "Interrogation Report: " .. name .. ", " .. date_str
+                table.insert(lines, title)
+                table.insert(lines, "Interrogator: " .. (r.officer_name or 'Unknown'))
+                table.insert(lines, "")
+                local text = ''
+                if r.details then
+                    for di = 0, #r.details - 1 do
+                        local str_ptr = r.details[di]
+                        if str_ptr then text = text .. (di > 0 and '\n' or '') .. tostring(str_ptr.value) end
+                    end
+                end
+                for s in text:gmatch("[^\r\n]+") do
+                    table.insert(lines, s)
+                end
+            else
+                table.insert(lines, "No report selected.")
+            end
         end
     end
     
@@ -3033,29 +3735,197 @@ function JusticeHQ:onRelease()
     )
 end
 
+function JusticeHQ:onConvict()
+    if not self.selected_suspect then return end
+    if not isConvictable(self.selected_suspect) then return end
+    local suspect = self.selected_suspect
+    local unit = suspect.unit
+    
+    local open_crimes = getOpenCrimes(unit.hist_figure_id)
+    if #open_crimes == 0 then return end
+    
+    local self_ref = self
+    local choices = {}
+    
+    table.insert(choices, {
+        text = "Convict of ALL Open Crimes (" .. #open_crimes .. ")",
+        search_key = "all",
+        data = {action = 'all'}
+    })
+    
+    for _, crime in ipairs(open_crimes) do
+        local cname = getCrimeName(crime.mode)
+        local pstr = ""
+        pcall(function()
+            if crime.punishment.hammerstrikes > 0 then
+                pstr = crime.punishment.hammerstrikes .. " strikes"
+            end
+            if crime.punishment.prison_time > 0 then
+                if pstr ~= "" then pstr = pstr .. ", " end
+                pstr = pstr .. crime.punishment.prison_time .. "mo prison"
+            end
+        end)
+        if pstr == "" then
+            pstr = "no extra penalty"
+        end
+        
+        table.insert(choices, {
+            text = "[" .. cname .. "] (Penalty: " .. pstr .. ")",
+            search_key = string.lower(cname),
+            data = {action = 'single', crime = crime}
+        })
+    end
+    
+    dialogs.showListPrompt(
+        "Convict Suspect",
+        "Select the crime(s) to officially convict " .. suspect.first_name .. " of:",
+        COLOR_LIGHTRED,
+        choices,
+        function(idx, choice)
+            local has_prison = false
+            if choice.data.action == 'all' then
+                for _, crime in ipairs(open_crimes) do
+                    if crime.punishment.prison_time > 0 then has_prison = true break end
+                end
+            else
+                if choice.data.crime.punishment.prison_time > 0 then has_prison = true end
+            end
+
+            local function execute_conviction()
+                local convicted_count = 0
+                
+                local function applyPunishment(c, u)
+                    local p = df.punishment:new()
+                    p.criminal = u.id
+                    p.officer = -1
+                    p.beating = c.punishment.flags.beating and 50 or 0
+                    p.hammer_strikes = c.punishment.hammerstrikes
+                    p.prison_counter = c.punishment.prison_time * 3360  -- 3360 = 28 days * 1200 ticks/day / 10 ticks/season_tick
+                    p.time_to_assign = 0
+                    p.chain = -1
+                    if c.victim ~= -1 then
+                        p.victims:insert('#', c.victim)
+                    end
+                    df.global.plotinfo.punishments:insert('#', p)
+                end
+
+                if choice.data.action == 'all' then
+                    for _, crime in ipairs(open_crimes) do
+                        crime.accused = unit.id
+                        crime.accused_hf.hfid = unit.hist_figure_id
+                        crime.flags.needs_trial = false
+                        crime.flags.sentenced = true
+                        applyPunishment(crime, unit)
+                        convicted_count = convicted_count + 1
+                    end
+                else
+                    local crime = choice.data.crime
+                    crime.accused = unit.id
+                    crime.accused_hf.hfid = unit.hist_figure_id
+                    crime.flags.needs_trial = false
+                    crime.flags.sentenced = true
+                    applyPunishment(crime, unit)
+                    convicted_count = 1
+                end
+                
+                dfhack.gui.showAnnouncement("CI-HQ: " .. suspect.first_name .. " was convicted of " .. convicted_count .. " crime(s)! Justice will be served.", COLOR_LIGHTGREEN, true)
+                
+                -- Invalidate crime cache
+                initCrimeCache()
+                self_ref:refreshCurrentDossier()
+                if self_ref.subviews.suspect_list then
+                    self_ref.subviews.suspect_list:setChoices(self_ref:buildChoices())
+                end
+                if self_ref.subviews.network_list then
+                    self_ref.subviews.network_list:setChoices(self_ref:buildNetworkChoices())
+                end
+            end
+            
+            if has_prison and suspect.category ~= 'citizen' then
+                local civ_name = "an unknown civilization"
+                if unit.civ_id ~= -1 then
+                    local ent = df.historical_entity.find(unit.civ_id)
+                    if ent then
+                        pcall(function() civ_name = dfhack.translation.translateName(ent.name, true) end)
+                    end
+                end
+                
+                local cat_str = string.upper(suspect.category)
+                local text = string.format(
+                    "WARNING: %s is a %s of %s.\n\n" ..
+                    "As a foreign national, your justice system has no authority to\n" ..
+                    "permanently incarcerate them.\n\n" ..
+                    "Any corporal punishment (beatings/hammer strikes) will be carried\n" ..
+                    "out immediately by the Captain of the Guard. However, the game\n" ..
+                    "engine will silently void their prison sentence because they\n" ..
+                    "cannot be assigned to a dwarven jail chain.\n\n" ..
+                    "Meaning, any prison sentences convicted for\n" ..
+                    "%s will be void.\n" ..
+                    "They will only receive the beatings/hammer strikes, unless you use\n" ..
+                    "the Execute button instead.\n\n" ..
+                    "Do you still want to officially convict them?",
+                    suspect.name, cat_str, civ_name, suspect.name
+                )
+                
+                dialogs.showYesNoPrompt(
+                    "Convict Non-Citizen",
+                    text,
+                    COLOR_LIGHTRED,
+                    execute_conviction
+                )
+            else
+                execute_conviction()
+            end
+        end
+    )
+end
+
 function JusticeHQ:onPardon()
     if not self.selected_suspect then
         dfhack.gui.showAnnouncement("CI-HQ: Select a suspect first.", COLOR_YELLOW)
         return
     end
+    
     local unit = self.selected_suspect.unit
+    local name = dfhack.units.getReadableName(unit)
+    local unit_id = unit.id
+    local self_ref = self
     
-    local pardoned = false
-    for _, punishment in ipairs(df.global.plotinfo.punishments) do
-        if punishment.criminal == unit.id then
-            punishment.prison_counter = 0
-            punishment.beating = 0
-            punishment.hammer_strikes = 0
-            pardoned = true
+    dialogs.showYesNoPrompt(
+        'CI-HQ: Pardon Suspect',
+        'Are you sure you want to fully pardon ' .. name .. '?\n\n' ..
+        'This will instantly clear all pending and active sentences,\n' ..
+        'including beatings, hammer strikes, and imprisonment.\n' ..
+        'If the suspect is currently chained, they will be released.\n\n' ..
+        'This action cannot be undone.',
+        COLOR_LIGHTCYAN,
+        function()
+            local target = df.unit.find(unit_id)
+            if not target then return end
+            
+            local pardoned = false
+            for _, punishment in ipairs(df.global.plotinfo.punishments) do
+                if punishment.criminal == target.id then
+                    punishment.prison_counter = 0
+                    punishment.beating = 0
+                    punishment.hammer_strikes = 0
+                    pardoned = true
+                end
+            end
+            
+            -- Also release from chains if detained
+            if target.flags1.chained then
+                releaseUnit(target)
+            end
+            
+            if pardoned then
+                dfhack.gui.showAnnouncement("CI-HQ: Suspect " .. dfhack.units.getReadableName(target) .. " has been fully pardoned.", COLOR_LIGHTCYAN, true)
+                self_ref:refreshCurrentDossier()
+            else
+                dfhack.gui.showAnnouncement("CI-HQ: Suspect is not currently serving a sentence.", COLOR_GREY, true)
+            end
         end
-    end
-    
-    if pardoned then
-        dfhack.gui.showAnnouncement("CI-HQ: Suspect " .. dfhack.units.getReadableName(unit) .. " has been fully pardoned.", COLOR_LIGHTCYAN, true)
-        self:refreshCurrentDossier()
-    else
-        dfhack.gui.showAnnouncement("CI-HQ: Suspect is not currently serving a sentence.", COLOR_GREY, true)
-    end
+    )
 end
 
 function JusticeHQ:onExecute()
@@ -3082,15 +3952,15 @@ function JusticeHQ:onExecute()
             executor_name = "Captain of the Guard"
         end
         
-        df.global.plotinfo.punishments:insert('#', {
-            criminal = unit.id,
-            officer = -1,
-            beating = beatings,
-            hammer_strikes = hammer_strikes,
-            prison_counter = 0,
-            time_to_assign = 10,
-            chain = -1
-        })
+        local p = df.punishment:new()
+        p.criminal = unit.id
+        p.officer = -1
+        p.beating = beatings
+        p.hammer_strikes = hammer_strikes
+        p.prison_counter = 0
+        p.time_to_assign = 10
+        p.chain = -1
+        df.global.plotinfo.punishments:insert('#', p)
         
         dfhack.gui.showAnnouncement("CI-HQ: EXECUTION ORDERED for " .. dfhack.units.getReadableName(unit) .. ". " .. executor_name .. " dispatched.", COLOR_RED, true)
     else
@@ -3146,9 +4016,42 @@ function JusticeHQ:onInterrogate()
     
     local uid = suspect.unit.id
     
-    if not dfhack.units.isActive(suspect.unit) then
-        dfhack.gui.showAnnouncement("CI-HQ: Cannot interrogate " .. suspect.first_name .. " — they have left the map!", COLOR_RED)
+    if dfhack.units.isDead(suspect.unit) or not dfhack.units.isActive(suspect.unit) then
+        -- Allow cancelling even if they left the map or died
+        if interrogation_watchlist[uid] then
+            local watch = interrogation_watchlist[uid]
+            if watch.status == 'active' or watch.status == 'dispatched' then
+                watch.status = not dfhack.units.isDead(suspect.unit) and 'escaped' or 'dead'
+                dfhack.gui.showAnnouncement("CI-HQ: Interrogation aborted. Suspect is no longer available.", COLOR_RED)
+                persist_state()
+                self:refreshCurrentDossier()
+            end
+        end
+        dfhack.gui.showAnnouncement("CI-HQ: Cannot interrogate " .. suspect.first_name .. " — they are dead or gone!", COLOR_RED)
         return
+    end
+    
+    -- If already on watchlist and active/dispatched, treat as CANCEL (bypass guard check)
+    if interrogation_watchlist[uid] then
+        local watch = interrogation_watchlist[uid]
+        if watch.status == 'active' or watch.status == 'dispatched' then
+            dialogs.showYesNoPrompt(
+                'Cancel Interrogation?',
+                'Are you sure you want to cancel the interrogation loop on ' .. suspect.first_name .. '?\n\n' ..
+                'Reason: Manual cancellation requested.\n' ..
+                'Current Status: ' .. watch.status:upper() .. '\n' ..
+                'Attempts so far: ' .. (watch.retries or 0) .. '/' .. watch.max_retries .. '\n\n' ..
+                'The Captain of the Guard will stop re-dispatching to this suspect.',
+                COLOR_YELLOW,
+                function()
+                    watch.status = 'cancelled'
+                    dfhack.gui.showAnnouncement("CI-HQ: Interrogation of " .. suspect.first_name .. " cancelled.", COLOR_YELLOW)
+                    persist_state()
+                    self:refreshCurrentDossier()
+                end
+            )
+            return
+        end
     end
     
     -- Early guard check with actionable guidance
@@ -3166,32 +4069,14 @@ function JusticeHQ:onInterrogate()
         return
     end
     
-    -- If already on watchlist and active/dispatched, treat as CANCEL
+    -- Start or Resume interrogation
     if interrogation_watchlist[uid] then
         local watch = interrogation_watchlist[uid]
-        if watch.status == 'active' or watch.status == 'dispatched' then
-            dialogs.showYesNoPrompt(
-                'Cancel Interrogation?',
-                'Are you sure you want to cancel the interrogation loop on ' .. suspect.first_name .. '?\n\n' ..
-                'Status: ' .. watch.status:upper() .. '\n' ..
-                'Attempts so far: ' .. (watch.retries or 0) .. '/' .. watch.max_retries .. '\n\n' ..
-                'The Captain of the Guard will stop re-dispatching to this suspect.',
-                COLOR_YELLOW,
-                function()
-                    watch.status = 'cancelled'
-                    dfhack.gui.showAnnouncement("CI-HQ: Interrogation of " .. suspect.first_name .. " cancelled.", COLOR_YELLOW)
-                    persist_state()
-                    self:refreshCurrentDossier()
-                end
-            )
-            return
-        elseif watch.status == 'gave_up' or watch.status == 'escaped' or watch.status == 'concluded' or watch.status == 'cancelled' or watch.status == 'confessed' then
-            -- Allow re-interrogation from any terminal state
-            watch.retries = 0
-            watch.consecutive_duds = 0
-            watch.status = 'active'
-            dfhack.gui.showAnnouncement("Resuming interrogation of " .. suspect.first_name .. "!", COLOR_LIGHTGREEN)
-        end
+        -- Resume from terminal states
+        watch.retries = 0
+        watch.consecutive_duds = 0
+        watch.status = 'active'
+        dfhack.gui.showAnnouncement("Resuming interrogation of " .. suspect.first_name .. "!", COLOR_LIGHTGREEN)
     else
         interrogation_watchlist[uid] = {
             name = suspect.first_name,
@@ -3238,6 +4123,26 @@ monitor_running = monitor_running or false
 monitor_last_scheduled_tick = monitor_last_scheduled_tick or nil
 
 
+
+function getOpenCrimes(hfid)
+    local open_crimes = {}
+    if not CRIME_CACHE_HFID then return open_crimes end
+    local hf_crimes = CRIME_CACHE_HFID[hfid]
+    if not hf_crimes then return open_crimes end
+    
+    for _, crime in ipairs(hf_crimes) do
+        if crime.flags.needs_trial and crime.flags.discovered and crime.criminal_hf and crime.criminal_hf.hfid == hfid then
+            table.insert(open_crimes, crime)
+        end
+    end
+    return open_crimes
+end
+
+function isConvictable(suspect)
+    if not suspect or not suspect.unit then return false end
+    local open_crimes = getOpenCrimes(suspect.unit.hist_figure_id)
+    return #open_crimes > 0
+end
 
 function isSuspectStillThreat(uid)
     local unit = df.unit.find(uid)
@@ -3312,28 +4217,37 @@ function dispatchGuardToSuspect(uid)
     return ok
 end
 
+local function countIntelReports(hfid)
+    local count = 0
+    for _, rep in ipairs(df.global.world.status.interrogation_reports) do
+        if rep.subject_hf == hfid then
+            count = count + 1
+        end
+    end
+    return count
+end
+
 function interrogationMonitorTick()
     local ok, err = pcall(function()
         local any_active = false
         
         for uid, watch in pairs(interrogation_watchlist) do
             if watch.status == 'active' or watch.status == 'dispatched' then
-                -- Check if suspect confessed
-                if not isSuspectStillThreat(uid) then
-                    watch.status = 'confessed'
-                    dfhack.gui.showAnnouncement(
-                        "CI-HQ: " .. watch.name .. " has confessed! Intelligence extracted.",
-                        COLOR_LIGHTGREEN)
-                    CRIME_CACHE = nil
-                    INTERROGATION_HISTORY_CACHE = nil
+                local unit = df.unit.find(uid)
+                if not unit or dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then
+                    watch.status = (unit and not dfhack.units.isDead(unit)) and 'escaped' or 'dead'
+                    local reason = watch.status == 'escaped' and "has left the map!" or "has died!"
+                    dfhack.gui.showAnnouncement("CI-HQ: " .. watch.name .. " " .. reason .. " Interrogation aborted.", COLOR_RED)
                     persist_state()
                 else
-                    local unit = df.unit.find(uid)
-                    if not unit or not dfhack.units.isActive(unit) then
-                        watch.status = 'escaped'
+                    -- Check if suspect confessed (alive)
+                    if not isSuspectStillThreat(uid) then
+                        watch.status = 'confessed'
                         dfhack.gui.showAnnouncement(
-                            "CI-HQ: " .. watch.name .. " has left the map! Interrogation aborted.",
-                            COLOR_RED)
+                            "CI-HQ: " .. watch.name .. " has confessed! Intelligence extracted.",
+                            COLOR_LIGHTGREEN)
+                        CRIME_CACHE = nil
+                        INTERROGATION_HISTORY_CACHE = nil
                         persist_state()
                     else
                         any_active = true
@@ -3341,19 +4255,21 @@ function interrogationMonitorTick()
                         -- Check if Captain is currently interrogating
                         local guard = findCaptainOfGuard()
                         local guard_is_interrogating = false
+                        local guard_is_busy_justice = false
                         if guard and guard.job.current_job then
-                            guard_is_interrogating = guard.job.current_job.job_type == df.job_type.InterrogateSubject
+                            local jt = guard.job.current_job.job_type
+                            if jt == df.job_type.InterrogateSubject then
+                                guard_is_interrogating = true
+                                guard_is_busy_justice = true
+                            elseif jt == df.job_type.BeatCriminal or jt == df.job_type.ExecuteCriminal then
+                                guard_is_busy_justice = true
+                            end
                         end
                         
                         if watch.status == 'active' then
-                            if not guard_is_interrogating then
+                            if not guard_is_busy_justice then
                                 -- Snapshot the current report count before dispatching
-                                local hf = df.historical_figure.find(unit.hist_figure_id)
-                                if hf and hf.info and hf.info.relationships and hf.info.relationships.intrigues then
-                                    watch.last_report_count = #hf.info.relationships.intrigues.intrigue
-                                else
-                                    watch.last_report_count = 0
-                                end
+                                watch.last_report_count = countIntelReports(unit.hist_figure_id)
                                 
                                 if dispatchGuardToSuspect(uid) then
                                     watch.status = 'dispatched'
@@ -3370,22 +4286,33 @@ function interrogationMonitorTick()
                             if elapsed < 0 then elapsed = 999 end
                             
                             -- Wait for guard to finish or grace period to expire
-                            if not guard_is_interrogating and elapsed >= 100 then
+                            if not guard_is_busy_justice and elapsed >= 100 then
                                 -- Guard is idle and enough time passed for the job to have completed.
-                                -- Check if new intrigue reports appeared.
-                                local hf = df.historical_figure.find(unit.hist_figure_id)
+                                -- Check if new interrogation reports appeared.
+                                local new_count = countIntelReports(unit.hist_figure_id)
                                 local reports_found = false
-                                local is_dud = false
+                                local is_dud = true
                                 
-                                if hf and hf.info and hf.info.relationships and hf.info.relationships.intrigues then
-                                    local i_list = hf.info.relationships.intrigues.intrigue
-                                    if #i_list > (watch.last_report_count or 0) then
-                                        reports_found = true
-                                        local last = i_list[#i_list-1]
-                                        if last.role == -1 and last.strategy == -1 then
-                                            is_dud = true
+                                if new_count > (watch.last_report_count or 0) then
+                                    reports_found = true
+                                    -- Find the newest report for this target
+                                    local latest_report = nil
+                                    local latest_outcome = nil
+                                    for i = #df.global.world.status.interrogation_reports - 1, 0, -1 do
+                                        local r = df.global.world.status.interrogation_reports[i]
+                                        if r.subject_hf == unit.hist_figure_id then
+                                            latest_report = r
+                                            break
                                         end
                                     end
+                                    
+                                    if latest_report then
+                                        latest_outcome = computeIntelOutcome(latest_report)
+                                        if latest_outcome == 'CONFESSED' or latest_outcome == 'NEW INTEL' then
+                                            is_dud = false
+                                        end
+                                    end
+                                    watch.last_report_count = new_count
                                 end
 
                                 watch.retries = (watch.retries or 0) + 1
@@ -3409,13 +4336,18 @@ function interrogationMonitorTick()
                                     end
                                 else
                                     -- No new intel this round (suspect refused or had nothing new).
-                                    -- DF produces no intrigue entry for either case, so we can't
-                                    -- distinguish them. Count toward the consecutive dud limit.
+                                    -- We allow up to MAX_CONSECUTIVE_DUDS retries because refusals are stat-based rolls.
                                     watch.consecutive_duds = (watch.consecutive_duds or 0) + 1
+                                    
+                                    local dud_msg = "revealed no new intel"
+                                    if latest_outcome == 'REFUSED' then
+                                        dud_msg = "refused to cooperate"
+                                    end
+                                    
                                     if watch.consecutive_duds >= MAX_CONSECUTIVE_DUDS then
                                         watch.status = 'concluded'
                                         dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " revealed no new intel after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.",
+                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.",
                                             COLOR_YELLOW)
                                         persist_state()
                                     elseif watch.retries >= watch.max_retries then
@@ -3428,7 +4360,7 @@ function interrogationMonitorTick()
                                         watch.status = 'active'
                                         watch.dispatched_tick = nil
                                         dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " revealed no new intel (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...",
+                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...",
                                             COLOR_CYAN)
                                         persist_state()
                                     end
@@ -3539,17 +4471,41 @@ function ci_alert_monitor_tick()
             if unit.flags1.tame then goto skip_mon end
 
             local is_suspect = false
+            local hfid = unit.hist_figure_id
             
-            -- Check intrigue perspective (Fort Mode espionage data)
-            local hf = df.historical_figure.find(unit.hist_figure_id)
-            if hf then
-                local intrigue_data = getHfIntrigueData(hf)
-                if intrigue_data.is_villain then
-                    is_suspect = true
+            if hfid ~= -1 then
+                local hf = df.historical_figure.find(hfid)
+                if hf then
+                    local intrigue_data = getHfIntrigueData(hf)
+                    if intrigue_data.is_villain then is_suspect = true end
+                end
+                
+                -- Check for open warrants (CRITICAL ALERT)
+                initCrimeCache()
+                local open_crimes = getOpenCrimes(hfid)
+                
+                if #open_crimes > 0 then
+                    if not is_initial_scan then
+                        local name = dfhack.units.getReadableName(unit)
+                        local crime_names = {}
+                        for _, c in ipairs(open_crimes) do
+                            local cname = getCrimeName(c.mode)
+                            table.insert(crime_names, cname)
+                        end
+                        
+                        df.global.pause_state = true
+                        dfhack.gui.recenterCamera(unit.pos)
+                        
+                        local text = "Wanted criminal detected inside the fortress: " .. name .. "\n\nWanted for: " .. table.concat(crime_names, ", ") .. "\n\nArrest them immediately before they escape or continue plotting!"
+                        require('gui.dialogs').showMessage("Justice HQ Alert", text, COLOR_LIGHTRED)
+                        pcall(function() dfhack.gui.makeAnnouncement(df.announcement_type.MEGABEAST_ARRIVAL, {D_DISPLAY=true}, unit.pos, "JUSTICE HQ: Wanted criminal " .. name .. " detected!", COLOR_LIGHTRED, true) end)
+                    end
+                    GLOBAL_ALERTED_UNITS[unit.id] = true
+                    goto skip_mon
                 end
             end
             
-            -- Check Crime Record
+            -- If no warrant but is a known villain/suspect, do minor alert
             if not is_suspect then
                 local crimes = getUnitCrimeData(unit)
                 if crimes.times_accused > 0 then
