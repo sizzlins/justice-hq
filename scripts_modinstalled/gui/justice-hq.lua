@@ -3782,13 +3782,138 @@ function JusticeHQ:onConvict()
         COLOR_LIGHTRED,
         choices,
         function(idx, choice)
-            local has_prison = false
+            -- Gather the crimes being convicted
+            local selected_crimes = {}
             if choice.data.action == 'all' then
                 for _, crime in ipairs(open_crimes) do
-                    if crime.punishment.prison_time > 0 then has_prison = true break end
+                    table.insert(selected_crimes, crime)
                 end
             else
-                if choice.data.crime.punishment.prison_time > 0 then has_prison = true end
+                table.insert(selected_crimes, choice.data.crime)
+            end
+
+            -- Tally up total sentences
+            local total_beatings = 0
+            local total_strikes = 0
+            local total_prison_months = 0
+            local crime_names = {}
+            for _, crime in ipairs(selected_crimes) do
+                table.insert(crime_names, getCrimeName(crime.mode))
+                pcall(function()
+                    if crime.punishment.flags.beating then total_beatings = total_beatings + 1 end
+                    total_strikes = total_strikes + crime.punishment.hammerstrikes
+                    total_prison_months = total_prison_months + crime.punishment.prison_time
+                end)
+            end
+
+            -- Build sentence summary lines
+            local sentence_lines = {}
+            if total_beatings > 0 then
+                table.insert(sentence_lines, "  - " .. total_beatings .. " beating(s) by the Captain of the Guard")
+            end
+            if total_strikes > 0 then
+                table.insert(sentence_lines, "  - " .. total_strikes .. " hammer strike(s)")
+            end
+            if total_prison_months > 0 then
+                local days = total_prison_months * 28
+                table.insert(sentence_lines, "  - " .. total_prison_months .. " month(s) imprisonment (" .. days .. " days)")
+            end
+            if #sentence_lines == 0 then
+                table.insert(sentence_lines, "  - No additional penalty")
+            end
+
+            -- Check diplomatic protection for non-citizens
+            local has_diplomatic_protection = false
+            local civ_name = "an unknown civilization"
+            local is_noncitizen = (suspect.category ~= 'citizen')
+
+            if is_noncitizen then
+                -- Scan the HF's entity links for active membership in ANY
+                -- foreign civilization. Residents have their unit.civ_id
+                -- updated to the player's civ, so we can't rely on that.
+                local player_civ = df.global.plotinfo.civ_id
+                local hf_id = unit.hist_figure_id
+                if hf_id >= 0 then
+                    local hf = df.historical_figure.find(hf_id)
+                    if hf then
+                        for _, link in ipairs(hf.entity_links) do
+                            if df.histfig_entity_link_memberst:is_instance(link)
+                               and link.entity_id ~= player_civ then
+                                -- Verify this entity is a civilization (not a site gov/guild/religion)
+                                local ent = df.historical_entity.find(link.entity_id)
+                                if ent and ent.type == df.historical_entity_type.Civilization then
+                                    has_diplomatic_protection = true
+                                    pcall(function() civ_name = dfhack.translation.translateName(ent.name, true) end)
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- Build the confirmation text
+            local cat_str = string.upper(suspect.category)
+            local charges_str = ""
+            for i, cname in ipairs(crime_names) do
+                charges_str = charges_str .. "  " .. i .. ". " .. cname .. "\n"
+            end
+            local sentence_str = table.concat(sentence_lines, "\n") .. "\n"
+
+            local text = ""
+            local dialog_title = "CI-HQ: Convict Suspect"
+            local dialog_color = COLOR_LIGHTCYAN
+
+            if has_diplomatic_protection then
+                -- CASE 1: Foreign visitor with active citizenship = prison voided
+                dialog_title = "CI-HQ: Convict Foreign National"
+                dialog_color = COLOR_LIGHTRED
+                text = "WARNING: " .. suspect.name .. " is a " .. cat_str ..
+                    "\nand active citizen of " .. civ_name .. ".\n\n" ..
+                    "As a foreign national under diplomatic protection,\n" ..
+                    "your justice system has no authority to permanently\n" ..
+                    "incarcerate them. The game engine will silently void\n" ..
+                    "their prison sentence because foreign citizens cannot\n" ..
+                    "be assigned to a dwarven jail chain.\n\n" ..
+                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str ..
+                    "\nSentence if convicted:\n" .. sentence_str ..
+                    "\nWhat will actually happen:\n" ..
+                    "  - Beatings/hammer strikes WILL be carried out by\n" ..
+                    "    the Captain of the Guard.\n" ..
+                    "  - Prison time WILL BE VOIDED. " .. suspect.first_name ..
+                    " will\n    walk free after the beating.\n" ..
+                    "  - Use the Execute button instead for permanent removal.\n\n" ..
+                    "Do you still want to officially convict them?"
+
+            elseif is_noncitizen then
+                -- CASE 2: Outcast / stateless visitor = prison works normally
+                dialog_title = "CI-HQ: Convict Stateless Visitor"
+                dialog_color = COLOR_LIGHTCYAN
+                text = suspect.name .. " is a " .. cat_str ..
+                    " (Outcast / Stateless).\n\n" ..
+                    "This visitor has been expelled from their home\n" ..
+                    "civilization and has no diplomatic protection.\n" ..
+                    "All sentences, including imprisonment, will be\n" ..
+                    "carried out in full by your justice system.\n\n" ..
+                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str ..
+                    "\nSentence:\n" .. sentence_str ..
+                    "\nAll penalties will be enforced. The Captain of the\n" ..
+                    "Guard will carry out beatings, and " .. suspect.first_name ..
+                    "\nwill be chained in the dungeon for the full duration.\n\n" ..
+                    "Authorize conviction?"
+
+            else
+                -- CASE 3: Citizen = standard conviction
+                dialog_title = "CI-HQ: Convict Citizen"
+                dialog_color = COLOR_LIGHTCYAN
+                text = suspect.name .. "\n\n" ..
+                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str ..
+                    "\nSentence:\n" .. sentence_str ..
+                    "\nAll penalties will be enforced through the normal\n" ..
+                    "dwarven justice system. The Captain of the Guard\n" ..
+                    "will carry out any beatings, and the suspect will\n" ..
+                    "be jailed for the full prison duration.\n\n" ..
+                    "Authorize conviction?"
             end
 
             local function execute_conviction()
@@ -3800,7 +3925,7 @@ function JusticeHQ:onConvict()
                     p.officer = -1
                     p.beating = c.punishment.flags.beating and 50 or 0
                     p.hammer_strikes = c.punishment.hammerstrikes
-                    p.prison_counter = c.punishment.prison_time * 3360  -- 3360 = 28 days * 1200 ticks/day / 10 ticks/season_tick
+                    p.prison_counter = c.punishment.prison_time * 3360
                     p.time_to_assign = 0
                     p.chain = -1
                     if c.victim ~= -1 then
@@ -3830,7 +3955,6 @@ function JusticeHQ:onConvict()
                 
                 dfhack.gui.showAnnouncement("CI-HQ: " .. suspect.first_name .. " was convicted of " .. convicted_count .. " crime(s)! Justice will be served.", COLOR_LIGHTGREEN, true)
                 
-                -- Invalidate crime cache
                 initCrimeCache()
                 self_ref:refreshCurrentDossier()
                 if self_ref.subviews.suspect_list then
@@ -3840,68 +3964,13 @@ function JusticeHQ:onConvict()
                     self_ref.subviews.network_list:setChoices(self_ref:buildNetworkChoices())
                 end
             end
-            
-            if has_prison and suspect.category ~= 'citizen' then
-                -- Check if the visitor is an active citizen of a foreign civ
-                -- Outcasts/stateless visitors CAN be imprisoned (no diplomatic protection)
-                local has_diplomatic_protection = false
-                local civ_name = "an unknown civilization"
-                
-                if unit.civ_id ~= -1 then
-                    local ent = df.historical_entity.find(unit.civ_id)
-                    if ent then
-                        pcall(function() civ_name = dfhack.translation.translateName(ent.name, true) end)
-                    end
-                    
-                    -- Check HF entity links for active membership in their civ
-                    local hf_id = unit.hist_figure_id
-                    if hf_id >= 0 then
-                        local hf = df.historical_figure.find(hf_id)
-                        if hf then
-                            for _, link in ipairs(hf.entity_links) do
-                                if df.histfig_entity_link_memberst:is_instance(link)
-                                   and link.entity_id == unit.civ_id then
-                                    has_diplomatic_protection = true
-                                    break
-                                end
-                            end
-                        end
-                    end
-                end
-                
-                if has_diplomatic_protection then
-                    local cat_str = string.upper(suspect.category)
-                    local text = string.format(
-                        "WARNING: %s is a %s and active citizen of %s.\n\n" ..
-                        "As a foreign national under diplomatic protection, your\n" ..
-                        "justice system has no authority to permanently incarcerate\n" ..
-                        "them.\n\n" ..
-                        "Any corporal punishment (beatings/hammer strikes) will be\n" ..
-                        "carried out immediately by the Captain of the Guard.\n" ..
-                        "However, the game engine will silently void their prison\n" ..
-                        "sentence because they cannot be assigned to a jail chain.\n\n" ..
-                        "Meaning, any prison sentences convicted for\n" ..
-                        "%s will be void.\n" ..
-                        "They will only receive the beatings/hammer strikes,\n" ..
-                        "unless you use the Execute button instead.\n\n" ..
-                        "Do you still want to officially convict them?",
-                        suspect.name, cat_str, civ_name, suspect.name
-                    )
-                    
-                    dialogs.showYesNoPrompt(
-                        "Convict Non-Citizen",
-                        text,
-                        COLOR_LIGHTRED,
-                        execute_conviction
-                    )
-                else
-                    -- Outcast / stateless visitor: no diplomatic protection
-                    -- Prison sentences WILL work, proceed normally
-                    execute_conviction()
-                end
-            else
-                execute_conviction()
-            end
+
+            dialogs.showYesNoPrompt(
+                dialog_title,
+                text,
+                dialog_color,
+                execute_conviction
+            )
         end
     )
 end
