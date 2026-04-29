@@ -3842,37 +3842,63 @@ function JusticeHQ:onConvict()
             end
             
             if has_prison and suspect.category ~= 'citizen' then
+                -- Check if the visitor is an active citizen of a foreign civ
+                -- Outcasts/stateless visitors CAN be imprisoned (no diplomatic protection)
+                local has_diplomatic_protection = false
                 local civ_name = "an unknown civilization"
+                
                 if unit.civ_id ~= -1 then
                     local ent = df.historical_entity.find(unit.civ_id)
                     if ent then
                         pcall(function() civ_name = dfhack.translation.translateName(ent.name, true) end)
                     end
+                    
+                    -- Check HF entity links for active membership in their civ
+                    local hf_id = unit.hist_figure_id
+                    if hf_id >= 0 then
+                        local hf = df.historical_figure.find(hf_id)
+                        if hf then
+                            for _, link in ipairs(hf.entity_links) do
+                                if df.histfig_entity_link_memberst:is_instance(link)
+                                   and link.entity_id == unit.civ_id then
+                                    has_diplomatic_protection = true
+                                    break
+                                end
+                            end
+                        end
+                    end
                 end
                 
-                local cat_str = string.upper(suspect.category)
-                local text = string.format(
-                    "WARNING: %s is a %s of %s.\n\n" ..
-                    "As a foreign national, your justice system has no authority to\n" ..
-                    "permanently incarcerate them.\n\n" ..
-                    "Any corporal punishment (beatings/hammer strikes) will be carried\n" ..
-                    "out immediately by the Captain of the Guard. However, the game\n" ..
-                    "engine will silently void their prison sentence because they\n" ..
-                    "cannot be assigned to a dwarven jail chain.\n\n" ..
-                    "Meaning, any prison sentences convicted for\n" ..
-                    "%s will be void.\n" ..
-                    "They will only receive the beatings/hammer strikes, unless you use\n" ..
-                    "the Execute button instead.\n\n" ..
-                    "Do you still want to officially convict them?",
-                    suspect.name, cat_str, civ_name, suspect.name
-                )
-                
-                dialogs.showYesNoPrompt(
-                    "Convict Non-Citizen",
-                    text,
-                    COLOR_LIGHTRED,
-                    execute_conviction
-                )
+                if has_diplomatic_protection then
+                    local cat_str = string.upper(suspect.category)
+                    local text = string.format(
+                        "WARNING: %s is a %s and active citizen of %s.\n\n" ..
+                        "As a foreign national under diplomatic protection, your\n" ..
+                        "justice system has no authority to permanently incarcerate\n" ..
+                        "them.\n\n" ..
+                        "Any corporal punishment (beatings/hammer strikes) will be\n" ..
+                        "carried out immediately by the Captain of the Guard.\n" ..
+                        "However, the game engine will silently void their prison\n" ..
+                        "sentence because they cannot be assigned to a jail chain.\n\n" ..
+                        "Meaning, any prison sentences convicted for\n" ..
+                        "%s will be void.\n" ..
+                        "They will only receive the beatings/hammer strikes,\n" ..
+                        "unless you use the Execute button instead.\n\n" ..
+                        "Do you still want to officially convict them?",
+                        suspect.name, cat_str, civ_name, suspect.name
+                    )
+                    
+                    dialogs.showYesNoPrompt(
+                        "Convict Non-Citizen",
+                        text,
+                        COLOR_LIGHTRED,
+                        execute_conviction
+                    )
+                else
+                    -- Outcast / stateless visitor: no diplomatic protection
+                    -- Prison sentences WILL work, proceed normally
+                    execute_conviction()
+                end
             else
                 execute_conviction()
             end
