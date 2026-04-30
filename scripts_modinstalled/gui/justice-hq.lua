@@ -45,6 +45,37 @@ PERSISTENT_UI = PERSISTENT_UI or {
     active_tab = 1,
 }
 
+-- CI-HQ Notification overlay queue (survives close/reopen)
+CIHQ_NOTIFICATIONS = CIHQ_NOTIFICATIONS or {}
+local CIHQ_MAX_NOTIFICATIONS = 6
+local CIHQ_NOTIFICATION_LIFETIME_MS = 6000  -- 6 seconds real-time
+
+-- Wrapper: pushes to the colored overlay queue AND fires the native announcement
+local function cihq_announce(text, color, show_popup)
+    table.insert(CIHQ_NOTIFICATIONS, 1, {
+        text = text,
+        color = color or COLOR_GREY,
+        time = dfhack.getTickCount(),   -- real-time ms (works even when paused)
+    })
+    while #CIHQ_NOTIFICATIONS > CIHQ_MAX_NOTIFICATIONS do
+        table.remove(CIHQ_NOTIFICATIONS)
+    end
+    
+    -- The v50 vanilla UI ignores LIGHT colors (8-15) for generic announcements,
+    -- defaulting them to dark gray/black. We must map them to base colors (0-7).
+    local native_color = color or COLOR_GREY
+    if native_color == COLOR_LIGHTGREEN then native_color = COLOR_GREEN
+    elseif native_color == COLOR_LIGHTRED then native_color = COLOR_RED
+    elseif native_color == COLOR_LIGHTCYAN then native_color = COLOR_CYAN
+    elseif native_color == COLOR_LIGHTMAGENTA then native_color = COLOR_MAGENTA
+    elseif native_color == COLOR_YELLOW then native_color = COLOR_BROWN
+    elseif native_color == COLOR_WHITE then native_color = COLOR_GREY
+    elseif native_color == COLOR_LIGHTBLUE then native_color = COLOR_BLUE
+    end
+    
+    dfhack.gui.showAnnouncement(text, native_color, show_popup)
+end
+
 local MAX_RETRIES = 15
 local MAX_CONSECUTIVE_DUDS = 3  -- stop after this many failed attempts in a row
 local GLOBAL_KEY = 'gui/justice-hq'
@@ -611,7 +642,7 @@ end
 function IntelReportScreen:copyReport()
     local clipboard_text = self.report_text:gsub('\226\128\148', '--')
     dfhack.internal.setClipboardTextCp437Multiline(clipboard_text)
-    dfhack.gui.showAnnouncement("CI-HQ: Intel Report copied to clipboard.", COLOR_LIGHTGREEN, true)
+    cihq_announce("CI-HQ: Intel Report copied to clipboard.", COLOR_LIGHTGREEN, true)
 end
 
 function IntelReportScreen:exportReport()
@@ -621,9 +652,9 @@ function IntelReportScreen:exportReport()
         f:write('\239\187\191')
         f:write(self.report_text)
         f:close()
-        dfhack.gui.showAnnouncement("CI-HQ: Report exported to " .. export_path, COLOR_LIGHTGREEN, true)
+        cihq_announce("CI-HQ: Report exported to " .. export_path, COLOR_LIGHTGREEN, true)
     else
-        dfhack.gui.showAnnouncement("CI-HQ: Could not export report.", COLOR_RED, true)
+        cihq_announce("CI-HQ: Could not export report.", COLOR_RED, true)
     end
 end
 
@@ -1014,7 +1045,27 @@ function JusticeHQ:init()
                             text_pen = COLOR_LIGHTGREEN,
                             disabled_pen = COLOR_DARKGREY,
                             disabled = false,
-                            visible = true,
+                            visible = function()
+                                if self.selected_suspect and self.selected_suspect.unit then
+                                    local watch = interrogation_watchlist[self.selected_suspect.unit.id]
+                                    return not watch or (watch.status ~= 'active' and watch.status ~= 'dispatched')
+                                end
+                                return true
+                            end,
+                            on_activate = self:callback('onInterrogate'),
+                        },
+                        widgets.HotkeyLabel{
+                            frame = {l = 0, t = 1, w = 15},
+                            key = 'CUSTOM_I',
+                            label = 'Cancel',
+                            text_pen = COLOR_YELLOW,
+                            visible = function()
+                                if self.selected_suspect and self.selected_suspect.unit then
+                                    local watch = interrogation_watchlist[self.selected_suspect.unit.id]
+                                    return watch and (watch.status == 'active' or watch.status == 'dispatched')
+                                end
+                                return false
+                            end,
                             on_activate = self:callback('onInterrogate'),
                         },
                         widgets.HotkeyLabel{
@@ -2840,7 +2891,7 @@ function JusticeHQ:onSubmitCase(idx, choice)
     if self.selected_suspect then
         self:onOpenCaseFile(idx, {data = self.selected_suspect})
     else
-        dfhack.gui.showAnnouncement("CI-HQ: No accused found for this case. The suspect may have left the map.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: No accused found for this case. The suspect may have left the map.", COLOR_YELLOW, true)
     end
 end
 
@@ -2899,7 +2950,7 @@ end
 
 function JusticeHQ:onSubmitNetwork(idx, choice)
     if not choice or not choice.data then
-        dfhack.gui.showAnnouncement("CI-HQ: Select a specific person, not a header or plot row.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: Select a specific person, not a header or plot row.", COLOR_YELLOW)
         return
     end
     self.selected_suspect = choice.data
@@ -3614,7 +3665,7 @@ end
 function JusticeHQ:exportTabToFile()
     local output, tab_name, err = self:serializeCurrentTab()
     if not output then
-        dfhack.gui.showAnnouncement("CI-HQ: " .. err, COLOR_GREY)
+        cihq_announce("CI-HQ: " .. err, COLOR_GREY, true)
         return
     end
     
@@ -3644,7 +3695,7 @@ end
 function JusticeHQ:copyTabToClipboard()
     local output, tab_name, err, raw = self:serializeCurrentTab()
     if not output then
-        dfhack.gui.showAnnouncement("CI-HQ: " .. err, COLOR_GREY)
+        cihq_announce("CI-HQ: " .. err, COLOR_GREY, true)
         return
     end
     
@@ -3672,7 +3723,7 @@ end
 
 function JusticeHQ:onDetain()
     if not self.selected_suspect then
-        dfhack.gui.showAnnouncement("CI-HQ: Select a suspect first.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, true)
         return
     end
     
@@ -3680,7 +3731,7 @@ function JusticeHQ:onDetain()
     if not unit then return end
     
     if unit.flags1.chained then
-        dfhack.gui.showAnnouncement("CI-HQ: " .. dfhack.units.getReadableName(unit) .. " is already detained.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: " .. dfhack.units.getReadableName(unit) .. " is already detained.", COLOR_YELLOW, true)
         return
     end
     local name = dfhack.units.getReadableName(unit)
@@ -3696,10 +3747,10 @@ function JusticeHQ:onDetain()
         function()
             local ok, err = detainUnit(unit)
             if ok then
-                dfhack.gui.showAnnouncement("CI-HQ: " .. name .. " has been forcibly detained in the dungeon.", COLOR_LIGHTMAGENTA, true)
+                cihq_announce("CI-HQ: " .. name .. " has been forcibly detained in the dungeon.", COLOR_LIGHTMAGENTA, true)
                 self_ref:refreshCurrentDossier()
             else
-                dfhack.gui.showAnnouncement("CI-HQ: Detainment failed. " .. tostring(err), COLOR_RED, true)
+                cihq_announce("CI-HQ: Detainment failed. " .. tostring(err), COLOR_RED, true)
             end
         end
     )
@@ -3723,10 +3774,10 @@ function JusticeHQ:onRelease()
         function()
             local ok, err = releaseUnit(unit)
             if ok then
-                dfhack.gui.showAnnouncement("CI-HQ: " .. name .. " has been forcibly released.", COLOR_LIGHTGREEN, true)
+                cihq_announce("CI-HQ: " .. name .. " has been forcibly released.", COLOR_LIGHTGREEN, true)
                 self_ref:refreshCurrentDossier()
             else
-                dfhack.gui.showAnnouncement("CI-HQ: Release failed. " .. tostring(err), COLOR_RED, true)
+                cihq_announce("CI-HQ: Release failed. " .. tostring(err), COLOR_RED, true)
             end
         end
     )
@@ -3862,55 +3913,91 @@ function JusticeHQ:onConvict()
             local dialog_color = COLOR_LIGHTCYAN
 
             if has_diplomatic_protection then
-                -- CASE 1: Foreign visitor with active citizenship = prison voided
+                -- CASE 1: Foreign visitor with active citizenship
                 dialog_title = "CI-HQ: Convict Foreign National"
                 dialog_color = COLOR_LIGHTRED
-                text = "WARNING: " .. suspect.name .. " is a " .. cat_str ..
-                    "\nand active citizen of " .. civ_name .. ".\n\n" ..
-                    "As a foreign national under diplomatic protection,\n" ..
-                    "your justice system has no authority to permanently\n" ..
-                    "incarcerate them. The game engine will silently void\n" ..
-                    "their prison sentence because foreign citizens cannot\n" ..
-                    "be assigned to a dwarven jail chain.\n\n" ..
-                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str ..
-                    "\nSentence if convicted:\n" .. sentence_str ..
-                    "\nWhat will actually happen:\n" ..
-                    "  - Beatings/hammer strikes WILL be carried out by\n" ..
-                    "    the Captain of the Guard.\n" ..
-                    "  - Prison time WILL BE VOIDED. " .. suspect.first_name ..
-                    " will\n    walk free after the beating.\n" ..
-                    "  - Use the Execute button instead for permanent removal.\n\n" ..
+                text = {
+                    {text="WARNING: ", pen=COLOR_RED},
+                    {text=suspect.name, pen=COLOR_CYAN},
+                    " is a ",
+                    {text=cat_str, pen=COLOR_GREEN},
+                    "\nand active citizen of ",
+                    {text=civ_name, pen=COLOR_YELLOW},
+                    ".\n\n",
+                    "As a foreign national under diplomatic protection,\n",
+                    "your justice system has ",
+                    {text="no authority to permanently", pen=COLOR_RED},
+                    "\n",
+                    {text="incarcerate them.", pen=COLOR_RED},
+                    "\n\n",
+                    "Any corporal punishment (beatings/hammer strikes)\n",
+                    "will be carried out by the Captain of the Guard.\n",
+                    "However, the game engine will silently ",
+                    {text="void their", pen=COLOR_YELLOW},
+                    "\n",
+                    {text="prison sentence", pen=COLOR_YELLOW},
+                    " because they cannot be assigned\n",
+                    "to a jail chain.\n\n",
+                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str,
+                    "\nSentence if convicted:\n" .. sentence_str,
+                    "\nMeaning, any prison sentences for " .. suspect.first_name .. " will\n",
+                    "be ",
+                    {text="void", pen=COLOR_YELLOW},
+                    ". They will only receive the beatings/\n",
+                    "hammer strikes, unless you use ",
+                    {text="[k] Execute", pen=COLOR_RED},
+                    " instead.\n\n",
                     "Do you still want to officially convict them?"
+                }
 
             elseif is_noncitizen then
-                -- CASE 2: Outcast / stateless visitor = prison works normally
+                -- CASE 2: Outcast / stateless visitor
                 dialog_title = "CI-HQ: Convict Stateless Visitor"
-                dialog_color = COLOR_LIGHTCYAN
-                text = suspect.name .. " is a " .. cat_str ..
-                    " (Outcast / Stateless).\n\n" ..
-                    "This visitor has been expelled from their home\n" ..
-                    "civilization and has no diplomatic protection.\n" ..
-                    "All sentences, including imprisonment, will be\n" ..
-                    "carried out in full by your justice system.\n\n" ..
-                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str ..
-                    "\nSentence:\n" .. sentence_str ..
-                    "\nAll penalties will be enforced. The Captain of the\n" ..
-                    "Guard will carry out beatings, and " .. suspect.first_name ..
-                    "\nwill be chained in the dungeon for the full duration.\n\n" ..
+                dialog_color = COLOR_LIGHTRED
+                text = {
+                    {text=suspect.name, pen=COLOR_CYAN},
+                    " is a ",
+                    {text=cat_str, pen=COLOR_GREEN},
+                    " (",
+                    {text="Outcast / Stateless", pen=COLOR_GREY},
+                    ").\n\n",
+                    "This visitor has no diplomatic protection. Your\n",
+                    "justice system has full authority over them.\n\n",
+                    "All corporal punishment (beatings/hammer strikes)\n",
+                    "will be carried out by the Captain of the Guard.\n",
+                    "However, the game engine will silently ",
+                    {text="void their", pen=COLOR_YELLOW},
+                    "\n",
+                    {text="prison sentence", pen=COLOR_YELLOW},
+                    " because visitors cannot be assigned\n",
+                    "to a dwarven jail chain.\n\n",
+                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str,
+                    "\nSentence if convicted:\n" .. sentence_str,
+                    "\nMeaning, any prison sentences for " .. suspect.first_name .. " will\n",
+                    "be ",
+                    {text="void", pen=COLOR_YELLOW},
+                    ". They will only receive the beatings/\n",
+                    "hammer strikes, unless you use ",
+                    {text="[k] Execute", pen=COLOR_RED},
+                    " instead.\n\n",
                     "Authorize conviction?"
+                }
 
             else
                 -- CASE 3: Citizen = standard conviction
                 dialog_title = "CI-HQ: Convict Citizen"
-                dialog_color = COLOR_LIGHTCYAN
-                text = suspect.name .. "\n\n" ..
-                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str ..
-                    "\nSentence:\n" .. sentence_str ..
-                    "\nAll penalties will be enforced through the normal\n" ..
-                    "dwarven justice system. The Captain of the Guard\n" ..
-                    "will carry out any beatings, and the suspect will\n" ..
-                    "be jailed for the full prison duration.\n\n" ..
+                dialog_color = COLOR_LIGHTRED
+                text = {
+                    {text=suspect.name, pen=COLOR_CYAN},
+                    "\n\n",
+                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str,
+                    "\nSentence:\n" .. sentence_str,
+                    "\nAll penalties will be enforced through the normal\n",
+                    "dwarven justice system. The Captain of the Guard\n",
+                    "will carry out any beatings, and the suspect will\n",
+                    "be jailed for the full prison duration.\n\n",
                     "Authorize conviction?"
+                }
             end
 
             local function execute_conviction()
@@ -3950,7 +4037,7 @@ function JusticeHQ:onConvict()
                     convicted_count = 1
                 end
                 
-                dfhack.gui.showAnnouncement("CI-HQ: " .. suspect.first_name .. " was convicted of " .. convicted_count .. " crime(s)! Justice will be served.", COLOR_LIGHTGREEN, true)
+                cihq_announce("CI-HQ: " .. suspect.first_name .. " was convicted of " .. convicted_count .. " crime(s)! Justice will be served.", COLOR_LIGHTGREEN, true)
                 
                 initCrimeCache()
                 self_ref:refreshCurrentDossier()
@@ -3974,7 +4061,7 @@ end
 
 function JusticeHQ:onPardon()
     if not self.selected_suspect then
-        dfhack.gui.showAnnouncement("CI-HQ: Select a suspect first.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, true)
         return
     end
     
@@ -4011,10 +4098,10 @@ function JusticeHQ:onPardon()
             end
             
             if pardoned then
-                dfhack.gui.showAnnouncement("CI-HQ: Suspect " .. dfhack.units.getReadableName(target) .. " has been fully pardoned.", COLOR_LIGHTCYAN, true)
+                cihq_announce("CI-HQ: Suspect " .. dfhack.units.getReadableName(target) .. " has been fully pardoned.", COLOR_LIGHTCYAN, true)
                 self_ref:refreshCurrentDossier()
             else
-                dfhack.gui.showAnnouncement("CI-HQ: Suspect is not currently serving a sentence.", COLOR_GREY, true)
+                cihq_announce("CI-HQ: Suspect is not currently serving a sentence.", COLOR_GREY, true)
             end
         end
     )
@@ -4022,13 +4109,13 @@ end
 
 function JusticeHQ:onExecute()
     if not self.selected_suspect then
-        dfhack.gui.showAnnouncement("CI-HQ: Select a suspect first.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, true)
         return
     end
     local unit = self.selected_suspect.unit
     
     if not dfhack.units.isActive(unit) then
-        dfhack.gui.showAnnouncement("CI-HQ: Cannot execute - target has left the map!", COLOR_RED)
+        cihq_announce("CI-HQ: Cannot execute - target has left the map!", COLOR_RED, true)
         return
     end
     
@@ -4054,7 +4141,7 @@ function JusticeHQ:onExecute()
         p.chain = -1
         df.global.plotinfo.punishments:insert('#', p)
         
-        dfhack.gui.showAnnouncement("CI-HQ: EXECUTION ORDERED for " .. dfhack.units.getReadableName(unit) .. ". " .. executor_name .. " dispatched.", COLOR_RED, true)
+        cihq_announce("CI-HQ: EXECUTION ORDERED for " .. dfhack.units.getReadableName(unit) .. ". " .. executor_name .. " dispatched.", COLOR_RED, true)
     else
         -- Non-citizens: the vanilla punishment queue ignores foreign visitors entirely.
         -- Show a confirmation dialog explaining why and requesting player approval.
@@ -4074,12 +4161,12 @@ function JusticeHQ:onExecute()
             function()
                 local target = df.unit.find(unit_id)
                 if not target or not dfhack.units.isActive(target) then
-                    dfhack.gui.showAnnouncement("CI-HQ: Target has left the map. Execution aborted.", COLOR_RED)
+                    cihq_announce("CI-HQ: Target has left the map. Execution aborted.", COLOR_RED, true)
                     return
                 end
                 local exterminate = reqscript('exterminate')
                 exterminate.killUnit(target, exterminate.killMethod.INSTANT)
-                dfhack.gui.showAnnouncement("CI-HQ: " .. name .. " has been executed by order of the fortress!", COLOR_LIGHTRED, true)
+                cihq_announce("CI-HQ: " .. name .. " has been executed by order of the fortress!", COLOR_LIGHTRED, true)
                 CRIME_CACHE = nil
                 self_ref:refreshCurrentDossier()
             end
@@ -4102,7 +4189,7 @@ function JusticeHQ:onInterrogate()
         end
     end
     if not suspect then
-        dfhack.gui.showAnnouncement("CI-HQ: No suspect selected.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: No suspect selected.", COLOR_YELLOW, true)
         return
     end
     
@@ -4114,12 +4201,12 @@ function JusticeHQ:onInterrogate()
             local watch = interrogation_watchlist[uid]
             if watch.status == 'active' or watch.status == 'dispatched' then
                 watch.status = not dfhack.units.isDead(suspect.unit) and 'escaped' or 'dead'
-                dfhack.gui.showAnnouncement("CI-HQ: Interrogation aborted. Suspect is no longer available.", COLOR_RED)
+                cihq_announce("CI-HQ: Interrogation aborted. Suspect is no longer available.", COLOR_RED, true)
                 persist_state()
                 self:refreshCurrentDossier()
             end
         end
-        dfhack.gui.showAnnouncement("CI-HQ: Cannot interrogate " .. suspect.first_name .. " - they are dead or gone!", COLOR_RED)
+        cihq_announce("CI-HQ: Cannot interrogate " .. suspect.first_name .. " - they are dead or gone!", COLOR_RED, true)
         return
     end
     
@@ -4137,7 +4224,7 @@ function JusticeHQ:onInterrogate()
                 COLOR_YELLOW,
                 function()
                     watch.status = 'cancelled'
-                    dfhack.gui.showAnnouncement("CI-HQ: Interrogation of " .. suspect.first_name .. " cancelled.", COLOR_YELLOW)
+                    cihq_announce("CI-HQ: Interrogation of " .. suspect.first_name .. " cancelled.", COLOR_YELLOW, true)
                     persist_state()
                     self:refreshCurrentDossier()
                 end
@@ -4149,15 +4236,14 @@ function JusticeHQ:onInterrogate()
     -- Early guard check with actionable guidance
     local guard = findCaptainOfGuard()
     if not guard then
-        dfhack.gui.showAnnouncement(
-            "CI-HQ: No Captain of the Guard or Sheriff is assigned! Open the Nobles screen (n) and appoint one.",
-            COLOR_LIGHTRED, true)
+        cihq_announce(
+            "CI-HQ: No Captain of the Guard or Sheriff is assigned! Open the Nobles screen (n) and appoint one.", COLOR_LIGHTRED, true)
         return
     end
     
     -- Prevent interrogating the Captain themselves
     if guard.id == uid then
-        dfhack.gui.showAnnouncement("CI-HQ: The Captain of the Guard cannot interrogate themselves!", COLOR_LIGHTRED)
+        cihq_announce("CI-HQ: The Captain of the Guard cannot interrogate themselves!", COLOR_LIGHTRED, true)
         return
     end
     
@@ -4168,7 +4254,7 @@ function JusticeHQ:onInterrogate()
         watch.retries = 0
         watch.consecutive_duds = 0
         watch.status = 'active'
-        dfhack.gui.showAnnouncement("Resuming interrogation of " .. suspect.first_name .. "!", COLOR_LIGHTGREEN)
+        cihq_announce("Resuming interrogation of " .. suspect.first_name .. "!", COLOR_LIGHTGREEN, true)
     else
         interrogation_watchlist[uid] = {
             name = suspect.first_name,
@@ -4195,10 +4281,10 @@ function JusticeHQ:onInterrogate()
         end
         watch.status = 'dispatched'
         watch.dispatched_tick = df.global.cur_year_tick
-        dfhack.gui.showAnnouncement("CI-HQ: Captain dispatched to interrogate " .. suspect.first_name .. "!", COLOR_LIGHTGREEN)
+        cihq_announce("CI-HQ: Captain dispatched to interrogate " .. suspect.first_name .. "!", COLOR_LIGHTGREEN, true)
     else
-        dfhack.gui.showAnnouncement("CI-HQ: Could not auto-dispatch (" .. tostring(err) .. ")", COLOR_YELLOW)
-        dfhack.gui.showAnnouncement("CI-HQ: Use Justice tab to manually order interrogation.", COLOR_CYAN)
+        cihq_announce("CI-HQ: Could not auto-dispatch (" .. tostring(err) .. ")", COLOR_YELLOW)
+        cihq_announce("CI-HQ: Use Justice tab to manually order interrogation.", COLOR_CYAN, true)
     end
     
     startInterrogationMonitor()
@@ -4329,15 +4415,14 @@ function interrogationMonitorTick()
                 if not unit or dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then
                     watch.status = (unit and not dfhack.units.isDead(unit)) and 'escaped' or 'dead'
                     local reason = watch.status == 'escaped' and "has left the map!" or "has died!"
-                    dfhack.gui.showAnnouncement("CI-HQ: " .. watch.name .. " " .. reason .. " Interrogation aborted.", COLOR_RED)
+                    cihq_announce("CI-HQ: " .. watch.name .. " " .. reason .. " Interrogation aborted.", COLOR_RED, true)
                     persist_state()
                 else
                     -- Check if suspect confessed (alive)
                     if not isSuspectStillThreat(uid) then
                         watch.status = 'confessed'
-                        dfhack.gui.showAnnouncement(
-                            "CI-HQ: " .. watch.name .. " has confessed! Intelligence extracted.",
-                            COLOR_LIGHTGREEN)
+                        cihq_announce(
+                            "CI-HQ: " .. watch.name .. " has confessed! Intelligence extracted.", COLOR_LIGHTGREEN, true)
                         CRIME_CACHE = nil
                         INTERROGATION_HISTORY_CACHE = nil
                         persist_state()
@@ -4366,9 +4451,8 @@ function interrogationMonitorTick()
                                 if dispatchGuardToSuspect(uid) then
                                     watch.status = 'dispatched'
                                     watch.dispatched_tick = df.global.cur_year_tick
-                                    dfhack.gui.showAnnouncement(
-                                        "CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".",
-                                        COLOR_LIGHTGREEN)
+                                    cihq_announce(
+                                        "CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".", COLOR_LIGHTGREEN, true)
                                 end
                             end
                         elseif watch.status == 'dispatched' then
@@ -4414,16 +4498,14 @@ function interrogationMonitorTick()
                                     watch.consecutive_duds = 0
                                     if watch.retries >= watch.max_retries then
                                         watch.status = 'concluded'
-                                        dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.",
-                                            COLOR_YELLOW)
+                                        cihq_announce(
+                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
                                         persist_state()
                                     else
                                         watch.status = 'active'
                                         watch.dispatched_tick = nil
-                                        dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " spilled some intel! Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...",
-                                            COLOR_LIGHTGREEN)
+                                        cihq_announce(
+                                            "CI-HQ: " .. watch.name .. " spilled some intel! Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_LIGHTGREEN, true)
                                         persist_state()
                                     end
                                 else
@@ -4438,22 +4520,19 @@ function interrogationMonitorTick()
                                     
                                     if watch.consecutive_duds >= MAX_CONSECUTIVE_DUDS then
                                         watch.status = 'concluded'
-                                        dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.",
-                                            COLOR_YELLOW)
+                                        cihq_announce(
+                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.", COLOR_YELLOW, true)
                                         persist_state()
                                     elseif watch.retries >= watch.max_retries then
                                         watch.status = 'concluded'
-                                        dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.",
-                                            COLOR_YELLOW)
+                                        cihq_announce(
+                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
                                         persist_state()
                                     else
                                         watch.status = 'active'
                                         watch.dispatched_tick = nil
-                                        dfhack.gui.showAnnouncement(
-                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...",
-                                            COLOR_CYAN)
+                                        cihq_announce(
+                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_CYAN, true)
                                         persist_state()
                                     end
                                 end
@@ -4475,7 +4554,7 @@ function interrogationMonitorTick()
     
     if not ok then
         -- Catch and report any error, then keep the monitor alive
-        dfhack.gui.showAnnouncement("CI-HQ: Monitor error: " .. tostring(err), COLOR_LIGHTRED)
+        cihq_announce("CI-HQ: Monitor error: " .. tostring(err), COLOR_LIGHTRED, true)
         print("CI-HQ MONITOR ERROR: " .. tostring(err))
         -- Reschedule even on error so monitoring doesn't die silently
         monitor_last_scheduled_tick = df.global.cur_year_tick
@@ -4526,7 +4605,69 @@ function JusticeHQOverlay:init()
     }
 end
 
-OVERLAY_WIDGETS = {hq_button=JusticeHQOverlay}
+--
+-- CIHQNotifyOverlay: vivid colored notification toasts
+--
+CIHQNotifyOverlay = defclass(CIHQNotifyOverlay, overlay.OverlayWidget)
+CIHQNotifyOverlay.ATTRS{
+    desc='Shows CI-HQ action notifications with vivid colors on the game screen.',
+    default_pos={x=1, y=1},
+    default_enabled=false,
+    fullscreen=true,
+    viewscreens='dwarfmode/Default',
+}
+
+function CIHQNotifyOverlay:preUpdateLayout(parent_rect)
+    self.frame.w = parent_rect.width
+    self.frame.h = parent_rect.height
+end
+
+local CIHQ_NOTIFICATION_LIFETIME_MS = 10000  -- 10 seconds real-time
+
+function CIHQNotifyOverlay:render(dc)
+    -- Expire old notifications
+    local now = dfhack.getTickCount()
+    local i = #CIHQ_NOTIFICATIONS
+    while i >= 1 do
+        if (now - CIHQ_NOTIFICATIONS[i].time) > CIHQ_NOTIFICATION_LIFETIME_MS then
+            table.remove(CIHQ_NOTIFICATIONS, i)
+        end
+        i = i - 1
+    end
+
+    if #CIHQ_NOTIFICATIONS == 0 then return end
+
+    -- Render position: top-left, just below the top menu bar
+    local sw, sh = dfhack.screen.getWindowSize()
+    local base_y = 6  -- Start drawing at line 6 (below top toolbars)
+
+    for idx, notif in ipairs(CIHQ_NOTIFICATIONS) do
+        local y = base_y + idx - 1
+        if y >= 0 and y < sh then
+            -- Age-based fade: full brightness first, then dim
+            local age = now - notif.time
+            local color = notif.color
+            if age > (CIHQ_NOTIFICATION_LIFETIME_MS * 0.75) then
+                color = COLOR_LIGHTRED
+            end
+
+            -- Draw a solid background strip for readability (black background)
+            local text = notif.text
+            local strip_len = math.min(#text + 2, sw - 2)
+            for x = 0, strip_len - 1 do
+                dc:seek(x, y):char(' ', COLOR_BLACK)
+            end
+
+            -- Draw the colored text
+            dc:seek(1, y):pen(color):string(text)
+        end
+    end
+end
+
+OVERLAY_WIDGETS = {
+    hq_button=JusticeHQOverlay,
+    notifications=CIHQNotifyOverlay,
+}
 
 --
 -- Background Monitor Daemon
@@ -4608,7 +4749,7 @@ function ci_alert_monitor_tick()
             if is_suspect then
                 if not is_initial_scan then
                     local name = dfhack.units.getReadableName(unit)
-                    dfhack.gui.showAnnouncement("CI-HQ ALERT: A suspect with criminal/intelligence activity (" .. name .. ") has been detected!", COLOR_LIGHTRED, true)
+                    cihq_announce("CI-HQ ALERT: A suspect with criminal/intelligence activity (" .. name .. ") has been detected!", COLOR_LIGHTRED, true)
                 end
                 GLOBAL_ALERTED_UNITS[unit.id] = true
             end
@@ -4622,9 +4763,8 @@ function ci_alert_monitor_tick()
             if crime.mode == 3 or crime.mode == 17 then -- Theft or Treason/Artifact Theft
                 if not is_initial_scan then
                     local crime_name = getCrimeName(crime.mode)
-                    dfhack.gui.showAnnouncement(
-                        "CI-HQ ALERT: " .. crime_name .. " detected! Check Cases tab for details.",
-                        COLOR_LIGHTRED, true)
+                    cihq_announce(
+                        "CI-HQ ALERT: " .. crime_name .. " detected! Check Cases tab for details.", COLOR_LIGHTRED, true)
                     CRIME_CACHE = nil -- Invalidate cache so new crime data appears
                 end
                 GLOBAL_ALERTED_CRIMES[crime.id] = true
