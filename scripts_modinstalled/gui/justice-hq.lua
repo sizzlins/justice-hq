@@ -1200,7 +1200,7 @@ function JusticeHQ:buildEvidence(s)
             score = score + pts
             local detail = nil
             if crime.flags.needs_trial then
-                detail = "An active criminal investigation — this person is a suspect."
+                detail = "An active criminal investigation - this person is a suspect."
             elseif crime.flags.sentenced then
                 detail = "Case closed. Sentence has been served or is in progress."
             end
@@ -1293,7 +1293,7 @@ function JusticeHQ:buildEvidence(s)
             score = score + pts
             table.insert(evidence, {
                 text = "Currently CAGED (secured)",
-                detail = "Secured in a cage — not an immediate escape risk.",
+                detail = "Secured in a cage - not an immediate escape risk.",
                 pts = pts, color = COLOR_GREEN,
             })
         elseif s.crime_data.is_chained then
@@ -1301,7 +1301,7 @@ function JusticeHQ:buildEvidence(s)
             score = score + pts
             table.insert(evidence, {
                 text = "Currently CHAINED (secured)",
-                detail = "Restrained at a chain — limited movement.",
+                detail = "Restrained at a chain - limited movement.",
                 pts = pts, color = COLOR_GREEN,
             })
         end
@@ -1339,7 +1339,7 @@ function JusticeHQ:buildEvidence(s)
             local pts = -50
             score = score + pts
             table.insert(evidence, {
-                text = "CONFESSED — intelligence extracted",
+                text = "CONFESSED - intelligence extracted",
                 detail = "The suspect broke under interrogation and revealed information.",
                 pts = pts, color = COLOR_GREEN,
             })
@@ -2928,7 +2928,7 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
     end
     table.insert(lines, NEWLINE)
     if s.category and s.category ~= 'citizen' then
-        table.insert(lines, {text = string.char(16) .. " Foreign national — cannot be sentenced through normal justice.", pen = COLOR_YELLOW})
+        table.insert(lines, {text = string.char(16) .. " Foreign national - cannot be sentenced through normal justice.", pen = COLOR_YELLOW})
         table.insert(lines, NEWLINE)
         table.insert(lines, {text = "  Use [p] Pardon to release, or [k] Execute for permanent removal.", pen = COLOR_DARKGREY})
         table.insert(lines, NEWLINE)
@@ -3147,7 +3147,7 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
             table.insert(lines, {text = "  Status: ACTIVE (Captain dispatched)", pen = COLOR_LIGHTGREEN})
             table.insert(lines, NEWLINE)
         elseif watch.status == 'confessed' then
-            table.insert(lines, {text = "  Status: RESOLVED — Subject confessed.", pen = COLOR_LIGHTGREEN})
+            table.insert(lines, {text = "  Status: RESOLVED - Subject confessed.", pen = COLOR_LIGHTGREEN})
             table.insert(lines, NEWLINE)
         elseif watch.status == 'concluded' then
             table.insert(lines, {text = "  Status: CONCLUDED", pen = COLOR_CYAN})
@@ -3230,7 +3230,7 @@ function JusticeHQ:gatherSuspects()
     for _, unit in ipairs(df.global.world.units.active) do
         if dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then goto skip_unit end
         
-        -- Scan citizens, visitors, AND residents — spies can be any of these
+        -- Scan citizens, visitors, AND residents - spies can be any of these
         local dominated = dfhack.units.isCitizen(unit)
             or dfhack.units.isVisiting(unit)
             or (dfhack.units.isOwnCiv(unit) and dfhack.units.isAlive(unit))
@@ -3281,7 +3281,7 @@ function JusticeHQ:gatherSuspects()
                             threat = "Medium"
                             reason_lines = {
                                 "Has " .. intrigue_data.plot_count .. " intrigue plot(s) on hold.",
-                                "Dormant threat — may reactivate."
+                                "Dormant threat - may reactivate."
                             }
                         end
                     elseif intrigue_data.actor_count > 0 then
@@ -3639,7 +3639,7 @@ function JusticeHQ:exportTabToFile()
     end
 end
 
--- Copy to clipboard (Ctrl+C key) — uses DFHack's native clipboard API
+-- Copy to clipboard (Ctrl+C key) - uses DFHack's native clipboard API
 -- NOTE: May freeze briefly on very large exports due to CP437 conversion
 function JusticeHQ:copyTabToClipboard()
     local output, tab_name, err, raw = self:serializeCurrentTab()
@@ -3648,11 +3648,8 @@ function JusticeHQ:copyTabToClipboard()
         return
     end
     
-    -- The clipboard API expects pure CP437 but our raw text has UTF-8 literals
-    -- from Lua source (e.g. em dash —). Replace them with ASCII equivalents
-    -- before passing to the API, to prevent double-encoding garble (ΓÇö).
-    local clipboard_text = raw:gsub('\226\128\148', '--')  -- — (em dash) → --
-    dfhack.internal.setClipboardTextCp437Multiline(clipboard_text)
+    -- All text is now pure ASCII (no UTF-8 em dashes), safe for CP437 clipboard
+    dfhack.internal.setClipboardTextCp437Multiline(raw)
     dialogs.showMessage(
         'CI-HQ: Copied',
         tab_name .. ' tab copied to clipboard.\n\n' ..
@@ -4031,7 +4028,7 @@ function JusticeHQ:onExecute()
     local unit = self.selected_suspect.unit
     
     if not dfhack.units.isActive(unit) then
-        dfhack.gui.showAnnouncement("CI-HQ: Cannot execute — target has left the map!", COLOR_RED)
+        dfhack.gui.showAnnouncement("CI-HQ: Cannot execute - target has left the map!", COLOR_RED)
         return
     end
     
@@ -4068,7 +4065,7 @@ function JusticeHQ:onExecute()
             'CI-HQ: Extrajudicial Execution',
             'Target: ' .. name .. '\n\n' ..
             'This suspect is a non-citizen visitor. The dwarven justice\n' ..
-            'system cannot sentence foreign nationals — any punishment\n' ..
+            'system cannot sentence foreign nationals - any punishment\n' ..
             'order will be ignored by the Hammerer.\n\n' ..
             'CI-HQ can bypass the justice system and execute this\n' ..
             'suspect directly. This action cannot be undone.\n\n' ..
@@ -4122,7 +4119,7 @@ function JusticeHQ:onInterrogate()
                 self:refreshCurrentDossier()
             end
         end
-        dfhack.gui.showAnnouncement("CI-HQ: Cannot interrogate " .. suspect.first_name .. " — they are dead or gone!", COLOR_RED)
+        dfhack.gui.showAnnouncement("CI-HQ: Cannot interrogate " .. suspect.first_name .. " - they are dead or gone!", COLOR_RED)
         return
     end
     
@@ -4275,7 +4272,7 @@ function dispatchGuardToSuspect(uid)
     -- Check if guard is already interrogating THIS suspect
     if guard.job.current_job then
         if guard.job.current_job.job_type == df.job_type.InterrogateSubject then
-            -- Already interrogating someone — don't interrupt
+            -- Already interrogating someone - don't interrupt
             return false
         end
         
@@ -4286,7 +4283,7 @@ function dispatchGuardToSuspect(uid)
             end)
             if not ok then return false end
         else
-            -- Non-interruptable job (eating, sleeping, etc.) — wait
+            -- Non-interruptable job (eating, sleeping, etc.) - wait
             return false
         end
     end
@@ -4490,7 +4487,7 @@ end
 function startInterrogationMonitor()
     -- Always force-start the monitor. The old liveness check was unreliable
     -- because dfhack.timeout callbacks die on script reload and monitor_running
-    -- stays stale. Just always restart — duplicate starts are harmless since
+    -- stays stale. Just always restart - duplicate starts are harmless since
     -- the old callback chain is already dead.
     monitor_running = true
     monitor_last_scheduled_tick = df.global.cur_year_tick
@@ -4540,7 +4537,7 @@ GLOBAL_INITIAL_SCAN_DONE = GLOBAL_INITIAL_SCAN_DONE or false
 
 function ci_alert_monitor_tick()
     -- Restart the interrogation monitor if any watches are active/dispatched
-    -- (Don't call interrogationMonitorTick directly — it self-schedules on a 50-tick loop.
+    -- (Don't call interrogationMonitorTick directly - it self-schedules on a 50-tick loop.
     --  Calling it here would create a dual execution path, double-counting retries.)
     for _, watch in pairs(interrogation_watchlist) do
         if watch.status == 'active' or watch.status == 'dispatched' then
