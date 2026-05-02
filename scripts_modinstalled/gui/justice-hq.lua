@@ -5237,136 +5237,117 @@ NoArmokToggleOverlay.ATTRS = {
 function NoArmokToggleOverlay:init() end
 function NoArmokToggleOverlay:render(dc) end
 
+RealisticArrestsToggleOverlay = defclass(RealisticArrestsToggleOverlay, overlay.OverlayWidget)
+RealisticArrestsToggleOverlay.ATTRS = {
+    desc = 'Requires thieves to be physically seen by a military guard (Line-of-Sight) before the Emergency Detainment popup appears.',
+    default_enabled = false,
+    viewscreens = 'NONE',
+}
+
+function RealisticArrestsToggleOverlay:init() end
+function RealisticArrestsToggleOverlay:render(dc) end
+
+VillainEntryAlertsToggleOverlay = defclass(VillainEntryAlertsToggleOverlay, overlay.OverlayWidget)
+VillainEntryAlertsToggleOverlay.ATTRS = {
+    desc = 'Enables the CI-HQ popup alert whenever a known villain or criminal enters the fortress map.',
+    default_enabled = true,
+    viewscreens = 'NONE',
+}
+
+function VillainEntryAlertsToggleOverlay:init() end
+function VillainEntryAlertsToggleOverlay:render(dc) end
+
 OVERLAY_WIDGETS = {
     hq_button = JusticeHQOverlay,
     notifications = CIHQNotifyOverlay,
     no_armok = NoArmokToggleOverlay,
+    realistic_arrests = RealisticArrestsToggleOverlay,
+    villain_entry_alerts = VillainEntryAlertsToggleOverlay,
 }
 
---
--- Background Monitor Daemon
---
-
-
-GLOBAL_INITIAL_SCAN_DONE = GLOBAL_INITIAL_SCAN_DONE or false
-
-function ci_alert_monitor_tick()
-    -- Restart the interrogation monitor if any watches are active/dispatched
-    -- (Don't call interrogationMonitorTick directly - it self-schedules on a 50-tick loop.
-    --  Calling it here would create a dual execution path, double-counting retries.)
-    for _, watch in pairs(interrogation_watchlist) do
-        if watch.status == 'active' or watch.status == 'dispatched' then
-            startInterrogationMonitor()
-            break
-        end
+local function isRealisticArrestsEnabled()
+    local ok, plugins_overlay = pcall(require, 'plugins.overlay')
+    if ok and plugins_overlay and plugins_overlay.isOverlayEnabled then
+        return plugins_overlay.isOverlayEnabled('gui/justice-hq.realistic_arrests')
     end
-    
-    local is_initial_scan = not GLOBAL_INITIAL_SCAN_DONE
-    
-    for _, unit in ipairs(df.global.world.units.active) do
-        if dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then goto skip_mon end
-        if GLOBAL_ALERTED_UNITS[unit.id] then goto skip_mon end
-        
-        -- Check if relevant to fort
-        local dominated = dfhack.units.isCitizen(unit)
-            or dfhack.units.isResident(unit)
-            or dfhack.units.isVisiting(unit)
-            
-        if dominated and not dfhack.units.isInvader(unit) then
-            -- Exclude babies, children, and pets
-            if unit.profession == df.profession.BABY or unit.profession == df.profession.CHILD then goto skip_mon end
-            if unit.flags1.tame then goto skip_mon end
+    return false -- fallback default
+end
 
-            local is_suspect = false
-            local hfid = unit.hist_figure_id
-            
-            if hfid ~= -1 then
-                local hf = df.historical_figure.find(hfid)
-                if hf then
-                    local intrigue_data = getHfIntrigueData(hf)
-                    if intrigue_data.is_villain then is_suspect = true end
-                end
-                
-                -- Check for open warrants (CRITICAL ALERT)
-                initCrimeCache()
-                local open_crimes = getOpenCrimes(hfid)
-                
-                if #open_crimes > 0 then
-                    if not is_initial_scan then
-                        local name = dfhack.units.getReadableName(unit)
-                        local crime_names = {}
-                        for _, c in ipairs(open_crimes) do
-                            local cname = getCrimeName(c.mode)
-                            table.insert(crime_names, cname)
-                        end
-                        
-                        df.global.pause_state = true
-                        dfhack.gui.recenterCamera(unit.pos)
-                        
-                        local text = "Wanted criminal detected inside the fortress: " .. name .. "\n\nWanted for: " .. table.concat(crime_names, ", ") .. "\n\nArrest them immediately before they escape or continue plotting!"
-                        require('gui.dialogs').showMessage("Justice HQ Alert", text, COLOR_LIGHTRED)
-                        pcall(function() dfhack.gui.makeAnnouncement(df.announcement_type.MEGABEAST_ARRIVAL, {D_DISPLAY=true}, unit.pos, "JUSTICE HQ: Wanted criminal " .. name .. " detected!", COLOR_LIGHTRED, true) end)
+local function isVillainEntryAlertsEnabled()
+    local ok, plugins_overlay = pcall(require, 'plugins.overlay')
+    if ok and plugins_overlay and plugins_overlay.isOverlayEnabled then
+        return plugins_overlay.isOverlayEnabled('gui/justice-hq.villain_entry_alerts')
+    end
+    return true -- fallback default
+end
+
+--
+-- Military Line-of-Sight Check (module-level)
+--
+local function isNearMilitary(thief_unit, max_distance)
+    if not thief_unit or not thief_unit.pos then return false, nil end
+    local max_d = max_distance or 20
+    for _, u in ipairs(df.global.world.units.active) do
+        if dfhack.units.isCitizen(u) and dfhack.units.isActive(u) and not dfhack.units.isDead(u) then
+            if u.military.squad_id >= 0 then
+                local dx = math.abs(u.pos.x - thief_unit.pos.x)
+                local dy = math.abs(u.pos.y - thief_unit.pos.y)
+                local dz = math.abs(u.pos.z - thief_unit.pos.z)
+                if dz <= 1 and dx <= max_d and dy <= max_d then
+                    if dfhack.maps.canWalkBetween(u.pos, thief_unit.pos) then
+                        return true, dfhack.units.getReadableName(u)
                     end
-                    GLOBAL_ALERTED_UNITS[unit.id] = true
-                    goto skip_mon
                 end
-            end
-            
-            -- If no warrant but is a known villain/suspect, do minor alert
-            if not is_suspect then
-                local crimes = getUnitCrimeData(unit)
-                if crimes.times_accused > 0 then
-                    is_suspect = true
-                end
-            end
-            
-            if is_suspect then
-                if not is_initial_scan then
-                    local name = dfhack.units.getReadableName(unit)
-                    cihq_announce("CI-HQ ALERT: A suspect with criminal/intelligence activity (" .. name .. ") has been detected!", COLOR_LIGHTRED, true)
-                end
-                GLOBAL_ALERTED_UNITS[unit.id] = true
             end
         end
-        ::skip_mon::
     end
-    
-    -- Scan for new theft/treason crimes (artifact theft alerts) + Emergency Chain Intercept
+    return false, nil
+end
+
+--
+-- Crime Processing (shared by poll and event hook)
+--
+local function processNewCrimes(is_initial_scan)
+    local showed_popup_this_loop = false
     for _, crime in ipairs(df.global.world.crimes.all) do
         if not GLOBAL_ALERTED_CRIMES[crime.id] then
-            -- Catch ALL theft/espionage/treason-related crimes
-            -- Enum names: Theft(8), AttemptedTheft(15), Treason(16), Espionage(17), Robbery(9)
-            -- Also keep old magic numbers (3, 17) as fallback in case enum values differ at runtime
             local m = crime.mode
             local is_theft = (m == df.crime_type.Theft
                            or m == df.crime_type.AttemptedTheft
                            or m == df.crime_type.Treason
                            or m == df.crime_type.Espionage
                            or m == df.crime_type.Robbery
-                           or m == 3 or m == 17)  -- legacy fallback
+                           or m == 3 or m == 17)
             
             if is_theft then
                 GLOBAL_ALERTED_CRIMES[crime.id] = true
-                CRIME_CACHE = nil -- Invalidate cache so new crime data appears
+                CRIME_CACHE = nil
                 
-                if not is_initial_scan then
+                if not is_initial_scan and not showed_popup_this_loop then
                     local crime_name = getCrimeName(crime.mode)
                     
-                    -- Try to find the accused unit on the map
                     local accused_unit = nil
                     if crime.accused >= 0 then
                         accused_unit = df.unit.find(crime.accused)
                     end
-                    -- Fallback: try criminal field
                     if not accused_unit and crime.criminal >= 0 then
                         accused_unit = df.unit.find(crime.criminal)
                     end
                     
-                    -- If the thief is alive and on the map, offer emergency detainment
+                    local caught = false
+                    local guard_name = ""
                     if accused_unit and dfhack.units.isActive(accused_unit) and not dfhack.units.isDead(accused_unit) then
+                        if isRealisticArrestsEnabled() then
+                            caught, guard_name = isNearMilitary(accused_unit, 20)
+                        else
+                            caught = true
+                            guard_name = "an alert citizen"
+                        end
+                    end
+                    
+                    if caught then
                         local thief_name = dfhack.units.getReadableName(accused_unit)
                         
-                        -- Get stolen item name if available
                         local item_desc = ""
                         if crime.item_id >= 0 then
                             pcall(function()
@@ -5377,27 +5358,25 @@ function ci_alert_monitor_tick()
                             end)
                         end
                         
-                        -- Pause & center
                         df.global.pause_state = true
-                        dfhack.gui.recenterCamera(accused_unit.pos)
+                        pcall(function()
+                            if dfhack.gui.revealInDwarfmodeMap then
+                                dfhack.gui.revealInDwarfmodeMap(accused_unit.pos, true)
+                            elseif dfhack.gui.pauseRecenter then
+                                dfhack.gui.pauseRecenter(accused_unit.pos)
+                            elseif dfhack.gui.recenterCamera then
+                                dfhack.gui.recenterCamera(accused_unit.pos)
+                            end
+                        end)
                         
-                        -- Emergency announcement
                         pcall(function()
                             dfhack.gui.makeAnnouncement(
                                 df.announcement_type.MEGABEAST_ARRIVAL,
                                 {D_DISPLAY=true}, accused_unit.pos,
-                                "JUSTICE HQ: " .. crime_name .. " in progress! " .. thief_name .. " caught!",
+                                "JUSTICE HQ: " .. crime_name .. " in progress! " .. thief_name .. " caught by " .. guard_name .. "!",
                                 COLOR_LIGHTRED, true)
                         end)
                         
-                        -- Show Yes/No popup for emergency chain
-                        local dialogs = require('gui.dialogs')
-                        local prompt_text = 'CI-HQ EMERGENCY: ' .. thief_name .. ' was caught committing ' .. crime_name .. '!' ..
-                            item_desc ..
-                            '\n\nDo you authorize emergency detainment?' ..
-                            '\nThe suspect will be chained in the dungeon and any stolen items will be confiscated.'
-                        
-                        -- Capture crime reference for the callback
                         local crime_ref = crime
                         local unit_ref = accused_unit
                         
@@ -5406,7 +5385,10 @@ function ci_alert_monitor_tick()
                             title = 'CI-HQ: Emergency Detainment',
                             message_label_attrs = {
                                 frame = {t=0, l=0, b=4},
-                                text = prompt_text,
+                                text = 'CI-HQ EMERGENCY: ' .. thief_name .. ' was caught committing ' .. crime_name .. ' by ' .. guard_name .. '!' ..
+                                    item_desc ..
+                                    '\n\nDo you authorize emergency detainment?' ..
+                                    '\nThe suspect will be chained in the dungeon and any stolen items will be confiscated.',
                                 text_pen = COLOR_LIGHTRED,
                             },
                             accept_hotkey_label_attrs = {
@@ -5414,10 +5396,8 @@ function ci_alert_monitor_tick()
                                 frame = {b=0, l=0},
                             },
                             on_accept = function()
-                                -- YES: Chain & Confiscate
                                 local ok, err = detainUnit(unit_ref)
                                 if ok then
-                                    -- Confiscate stolen item
                                     local taken = confiscateStolenItem(unit_ref, crime_ref)
                                     local msg = "CI-HQ: " .. thief_name .. " has been chained in the dungeon!"
                                     if #taken > 0 then
@@ -5443,8 +5423,12 @@ function ci_alert_monitor_tick()
                             }
                         }
                         dialog:show()
+                        showed_popup_this_loop = true
+                    elseif accused_unit and dfhack.units.isActive(accused_unit) and not dfhack.units.isDead(accused_unit) then
+                        local thief_name = dfhack.units.getReadableName(accused_unit)
+                        cihq_announce(
+                            "CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " detected! (No guards were nearby to intercept). Handle manually via CI-HQ.", COLOR_YELLOW, true)
                     else
-                        -- Thief not found on map (already fled or dead) — just announce
                         cihq_announce(
                             "CI-HQ ALERT: " .. crime_name .. " detected! Suspect not found on map. Check Cases tab.", COLOR_LIGHTRED, true)
                     end
@@ -5452,6 +5436,99 @@ function ci_alert_monitor_tick()
             end
         end
     end
+end
+
+--
+-- Background Monitor Daemon
+--
+
+GLOBAL_INITIAL_SCAN_DONE = GLOBAL_INITIAL_SCAN_DONE or false
+
+function ci_alert_monitor_tick()
+    -- Restart the interrogation monitor if any watches are active/dispatched
+    for _, watch in pairs(interrogation_watchlist) do
+        if watch.status == 'active' or watch.status == 'dispatched' then
+            startInterrogationMonitor()
+            break
+        end
+    end
+    
+    local is_initial_scan = not GLOBAL_INITIAL_SCAN_DONE
+    
+    for _, unit in ipairs(df.global.world.units.active) do
+        if dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then goto skip_mon end
+        if GLOBAL_ALERTED_UNITS[unit.id] then goto skip_mon end
+        
+        local dominated = dfhack.units.isCitizen(unit)
+            or dfhack.units.isResident(unit)
+            or dfhack.units.isVisiting(unit)
+            
+        if dominated and not dfhack.units.isInvader(unit) then
+            if unit.profession == df.profession.BABY or unit.profession == df.profession.CHILD then goto skip_mon end
+            if unit.flags1.tame then goto skip_mon end
+
+            local is_suspect = false
+            local hfid = unit.hist_figure_id
+            
+            if hfid ~= -1 then
+                local hf = df.historical_figure.find(hfid)
+                if hf then
+                    local intrigue_data = getHfIntrigueData(hf)
+                    if intrigue_data.is_villain then is_suspect = true end
+                end
+                
+                initCrimeCache()
+                local open_crimes = getOpenCrimes(hfid)
+                
+                if #open_crimes > 0 then
+                    if not is_initial_scan and isVillainEntryAlertsEnabled() then
+                        local name = dfhack.units.getReadableName(unit)
+                        local crime_names = {}
+                        for _, c in ipairs(open_crimes) do
+                            local cname = getCrimeName(c.mode)
+                            table.insert(crime_names, cname)
+                        end
+                        
+                        df.global.pause_state = true
+                        pcall(function()
+                            if dfhack.gui.revealInDwarfmodeMap then
+                                dfhack.gui.revealInDwarfmodeMap(unit.pos, true)
+                            elseif dfhack.gui.pauseRecenter then
+                                dfhack.gui.pauseRecenter(unit.pos)
+                            elseif dfhack.gui.recenterCamera then
+                                dfhack.gui.recenterCamera(unit.pos)
+                            end
+                        end)
+                        
+                        local text = "Wanted criminal detected inside the fortress: " .. name .. "\n\nWanted for: " .. table.concat(crime_names, ", ") .. "\n\nArrest them immediately before they escape or continue plotting!"
+                        require('gui.dialogs').showMessage("Justice HQ Alert", text, COLOR_LIGHTRED)
+                        pcall(function() dfhack.gui.makeAnnouncement(df.announcement_type.MEGABEAST_ARRIVAL, {D_DISPLAY=true}, unit.pos, "JUSTICE HQ: Wanted criminal " .. name .. " detected!", COLOR_LIGHTRED, true) end)
+                    end
+                    GLOBAL_ALERTED_UNITS[unit.id] = true
+                    goto skip_mon
+                end
+            end
+            
+            if not is_suspect then
+                local crimes = getUnitCrimeData(unit)
+                if crimes.times_accused > 0 then
+                    is_suspect = true
+                end
+            end
+            
+            if is_suspect then
+                if not is_initial_scan then
+                    local name = dfhack.units.getReadableName(unit)
+                    cihq_announce("CI-HQ ALERT: A suspect with criminal/intelligence activity (" .. name .. ") has been detected!", COLOR_LIGHTRED, true)
+                end
+                GLOBAL_ALERTED_UNITS[unit.id] = true
+            end
+        end
+        ::skip_mon::
+    end
+    
+    -- Also poll crimes as fallback
+    processNewCrimes(is_initial_scan)
     
     GLOBAL_INITIAL_SCAN_DONE = true
 end
@@ -5464,6 +5541,11 @@ dfhack.onStateChange[GLOBAL_KEY] = function(sc)
     if sc == SC_MAP_UNLOADED then
         enabled = false
         return
+    end
+
+    if sc == SC_PAUSED and enabled and GLOBAL_INITIAL_SCAN_DONE then
+        -- Trigger crime scan instantly when the game pauses (e.g., from vanilla theft announcements)
+        processNewCrimes(false)
     end
 
     if sc ~= SC_MAP_LOADED or df.global.gamemode ~= df.game_mode.DWARF then
@@ -5482,24 +5564,39 @@ if dfhack_flags.module then
     return
 end
 
--- Handle enable/disable from gui/control-panel or command line
-local args = {...}
-if dfhack_flags and dfhack_flags.enable then
-    args = {dfhack_flags.enable_state and 'enable' or 'disable'}
+local function handle_enable_disable(action)
+    if action == 'enable' or action == '1' then
+        enabled = true
+        persist_state()
+        repeatUtil.scheduleUnlessAlreadyScheduled('ci-hq-monitor', 1200, 'ticks', ci_alert_monitor_tick)
+        print("CI-HQ: Background suspect alert monitor ENABLED (with instant pause detection).")
+        return true
+    elseif action == 'disable' or action == '0' then
+        enabled = false
+        persist_state()
+        repeatUtil.cancel('ci-hq-monitor')
+        GLOBAL_INITIAL_SCAN_DONE = false
+        GLOBAL_ALERTED_UNITS = {}
+        GLOBAL_ALERTED_CRIMES = {}
+        print("CI-HQ: Background suspect alert monitor DISABLED.")
+        return true
+    end
+    return false
 end
 
-if args[1] == 'enable' or args[1] == '1' then
-    enabled = true
-    persist_state()
-    repeatUtil.scheduleUnlessAlreadyScheduled('ci-hq-monitor', 1200, 'ticks', ci_alert_monitor_tick)
-    print("CI-HQ: Background suspect alert monitor ENABLED.")
-    return
-elseif args[1] == 'disable' or args[1] == '0' then
-    enabled = false
-    persist_state()
-    repeatUtil.cancel('ci-hq-monitor')
-    print("CI-HQ: Background suspect alert monitor DISABLED.")
-    return
+-- Handle enable/disable from gui/control-panel or dfhack_flags
+if dfhack_flags and dfhack_flags.enable then
+    local action = dfhack_flags.enable_state and 'enable' or 'disable'
+    if handle_enable_disable(action) then
+        return
+    end
+end
+
+-- For manual arguments passed to the script via console, we just use the global `args` if available, or just ignore since we use dfhack_flags
+if _G.args and type(_G.args) == 'table' and #_G.args > 0 then
+    if handle_enable_disable(_G.args[1]) then
+        return
+    end
 end
 
 local screen = JusticeHQ()
