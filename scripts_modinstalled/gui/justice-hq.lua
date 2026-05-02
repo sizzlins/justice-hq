@@ -176,6 +176,27 @@ local PLOT_TOOLTIPS = {
     Infiltrate_Society = "Embed agents into a civilization or site.",
 }
 
+-- Semantic colors: violent/lethal = red, espionage/stealth = magenta,
+-- corruption/political = yellow, resource/economic = brown, defensive = cyan
+local PLOT_COLORS = {
+    Grow_Funding_Network = COLOR_BROWN,
+    Grow_Asset_Network = COLOR_CYAN,
+    Acquire_Artifact = COLOR_LIGHTMAGENTA,
+    Grow_Corruption_Network = COLOR_YELLOW,
+    Attain_Rank = COLOR_YELLOW,
+    Assassinate_Actor = COLOR_LIGHTRED,
+    Corruptly_Punish_Actor = COLOR_RED,
+    Frame_Actor = COLOR_LIGHTMAGENTA,
+    Kidnap_Actor = COLOR_LIGHTRED,
+    Sabotage_Actor = COLOR_RED,
+    Direct_War_To_Actor = COLOR_LIGHTRED,
+    Corrupt_Actors_Government = COLOR_YELLOW,
+    Counterintelligence = COLOR_LIGHTCYAN,
+    Become_Immortal = COLOR_LIGHTMAGENTA,
+    Undead_World_Conquest = COLOR_LIGHTRED,
+    Infiltrate_Society = COLOR_LIGHTCYAN,
+}
+
 local ROLE_TOOLTIPS = {
     Possible_Threat = "Identified as a potential obstacle to the mastermind's plans.",
     Rebuffed = "Refused the mastermind's overtures. May be targeted.",
@@ -201,6 +222,33 @@ local ROLE_TOOLTIPS = {
     None = "No specific role assigned.",
 }
 
+-- Roles colored by function: leadership = white, operatives = lightred,
+-- logistics/support = brown, targets/victims = yellow, passive = grey
+local ROLE_COLORS = {
+    Master = COLOR_WHITE,
+    Director = COLOR_WHITE,
+    Indirect_Director = COLOR_WHITE,
+    Lieutenant = COLOR_LIGHTCYAN,
+    Handler = COLOR_LIGHTCYAN,
+    Asset = COLOR_LIGHTGREEN,
+    Usable_Assassin = COLOR_LIGHTRED,
+    Usable_Thief = COLOR_LIGHTRED,
+    Usable_Snatcher = COLOR_LIGHTRED,
+    Plot_Snatcher = COLOR_LIGHTRED,
+    Plot_Saboteur = COLOR_RED,
+    Source_Of_Funds = COLOR_BROWN,
+    Source_Of_Funds_For_Master = COLOR_BROWN,
+    Corrupt_Position_Holder = COLOR_YELLOW,
+    Delivery_Target = COLOR_LIGHTMAGENTA,
+    Underworld_Contact = COLOR_LIGHTMAGENTA,
+    Possible_Threat = COLOR_YELLOW,
+    Rebuffed = COLOR_GREY,
+    Suspected_Criminal = COLOR_YELLOW,
+    Potential_Employer = COLOR_GREY,
+    Enemy = COLOR_RED,
+    None = COLOR_DARKGREY,
+}
+
 local STRATEGY_TOOLTIPS = {
     Corrupt_And_Pacify = "Bribe or coerce to prevent interference.",
     Obey = "Follow this actor's orders without question.",
@@ -212,6 +260,21 @@ local STRATEGY_TOOLTIPS = {
     Work_If_Suited = "Collaborate when mutually beneficial.",
     Torment = "Inflict suffering as punishment or intimidation.",
     None = "No specific strategy assigned.",
+}
+
+-- Strategies colored by hostility: lethal = red, exploitative = yellow,
+-- passive = grey, cooperative = cyan
+local STRATEGY_COLORS = {
+    Neutralize = COLOR_LIGHTRED,
+    Torment = COLOR_RED,
+    Corrupt_And_Pacify = COLOR_YELLOW,
+    Use = COLOR_YELLOW,
+    Tax = COLOR_BROWN,
+    Obey = COLOR_LIGHTCYAN,
+    Monitor = COLOR_CYAN,
+    Avoid = COLOR_GREY,
+    Work_If_Suited = COLOR_LIGHTGREEN,
+    None = COLOR_DARKGREY,
 }
 
 local function dfDateString(year, year_tick)
@@ -271,7 +334,7 @@ function initCrimeCache()
     local events = df.global.world.history.events
     for i = #events - 1, 0, -1 do
         local event = events[i]
-        if df.history_event_hf_interrogatedst:is_instance(event) then
+        if event and df.history_event_hf_interrogatedst:is_instance(event) then
             pcall(function()
                 local thf = event.target_hf or event.subject_hf
                 if thf then
@@ -464,6 +527,59 @@ function releaseUnit(unit)
 end
 
 -- ===========================
+-- Helper: Confiscate Stolen Item from Unit
+-- ===========================
+
+function confiscateStolenItem(unit, crime)
+    local confiscated = {}
+    local ok, err = pcall(function()
+        if not crime or crime.item_id == -1 then return end
+        local target_item_id = crime.item_id
+        
+        -- Search unit inventory for the stolen item
+        for i = #unit.inventory - 1, 0, -1 do
+            local inv_item = unit.inventory[i]
+            if inv_item and inv_item.item and inv_item.item.id == target_item_id then
+                local item = inv_item.item
+                local item_name = dfhack.items.getDescription(item, 0, true)
+                
+                -- Drop item on the ground at unit's current position
+                if dfhack.items.moveToGround(item, unit.pos) then
+                    -- Mark as forbidden so dwarves don't immediately grab it during chaos
+                    item.flags.forbid = false
+                    item.flags.dump = false
+                    table.insert(confiscated, item_name)
+                end
+                break
+            end
+        end
+        
+        -- Also check if the unit is carrying the item via general_refs (artifact holder)
+        if #confiscated == 0 then
+            for i = #unit.general_refs - 1, 0, -1 do
+                local ref = unit.general_refs[i]
+                if df.general_ref_contains_itemst:is_instance(ref) and ref.item_id == target_item_id then
+                    local item = df.item.find(ref.item_id)
+                    if item then
+                        local item_name = dfhack.items.getDescription(item, 0, true)
+                        if dfhack.items.moveToGround(item, unit.pos) then
+                            item.flags.forbid = false
+                            table.insert(confiscated, item_name)
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end)
+    
+    if not ok then
+        dfhack.printerr("CI-HQ: Error confiscating item: " .. tostring(err))
+    end
+    return confiscated
+end
+
+-- ===========================
 -- Helper: Create Interrogation Job
 -- ===========================
 
@@ -536,6 +652,30 @@ function fixGhostCases()
 end
 
 -- ===========================
+-- Helper: Fog of War check
+-- ===========================
+function hasConfessedToIntrigue(hf_id)
+    if not df.global.world.status.interrogation_reports then return false end
+    local reports = df.global.world.status.interrogation_reports
+    for i = 0, #reports - 1 do
+        local report = reports[i]
+        if report and report.subject_hf == hf_id then
+            local ok, succ = pcall(function() return report.intcr.flags.successful end)
+            local has_reveals = false
+            pcall(function()
+                if #report.confessed_target_crime_id > 0 or #report.revealed_agreement_id > 0 then
+                    has_reveals = true
+                end
+            end)
+            if (ok and succ) or has_reveals then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- ===========================
 -- Helper: Get Intrigue Data from Historical Figure
 -- Reads the ACTUAL Fort Mode espionage structures from hf.info.relationships.intrigues
 -- ===========================
@@ -547,49 +687,84 @@ function getHfIntrigueData(hf)
         plots = {},        -- list of {type, on_hold, actor_count}
         actors = {},       -- list of {hf_id, role, strategy}
         is_villain = false,
+        no_armok_locked = false,
     }
     if not hf or not hf.info or not hf.info.relationships then return data end
     local intrigues = hf.info.relationships.intrigues
     if not intrigues then return data end
 
     data.has_intrigues = true
+    
+    local no_armok_active = false
+    pcall(function()
+        no_armok_active = require('plugins.overlay').isOverlayEnabled('gui/justice-hq.no_armok')
+    end)
+    
+    if no_armok_active and not hasConfessedToIntrigue(hf.id) then
+        data.no_armok_locked = true
+        data.is_villain = false
+        return data
+    end
 
     -- Gather plots
     if intrigues.plots then
         for _, plot in ipairs(intrigues.plots) do
-            local plot_type_name = "Unknown"
-            pcall(function() plot_type_name = df.intrigue_plot_type[plot.plot_type] or "Unknown" end)
-            local actor_ids = {}
-            if plot.plot_agreements then
-                for _, pa in ipairs(plot.plot_agreements) do
-                    table.insert(actor_ids, pa.actor_id)
+            if plot then
+                local plot_type_name = "Unknown"
+                pcall(function() plot_type_name = df.intrigue_plot_type[plot.plot_type] or "Unknown" end)
+                local actor_ids = {}
+                if plot.plot_agreements then
+                    for _, pa in ipairs(plot.plot_agreements) do
+                        if pa then
+                            pcall(function() table.insert(actor_ids, pa.actor_id) end)
+                        end
+                    end
                 end
+                
+                local on_hold = false
+                pcall(function() on_hold = plot.flags.on_hold end)
+                
+                table.insert(data.plots, {
+                    type_name = plot_type_name,
+                    on_hold = on_hold,
+                    actor_ids = actor_ids,
+                    parameter = plot.parameter or -1,
+                    actor_nemesis_id = plot.actor_nemesis_id or -1,
+                    agreement = plot.agreement or -1,
+                    parent_plot = plot.parent_plot or -1,
+                })
+                data.plot_count = data.plot_count + 1
             end
-            table.insert(data.plots, {
-                type_name = plot_type_name,
-                on_hold = plot.flags.on_hold,
-                actor_ids = actor_ids,
-            })
-            data.plot_count = data.plot_count + 1
         end
     end
 
     -- Gather intrigue actors (the villain's perspective on other people)
     if intrigues.intrigue then
         for _, actor in ipairs(intrigues.intrigue) do
-            local role_name = "Unknown"
-            pcall(function() role_name = df.plot_role_type[actor.role] or "Unknown" end)
-            local strategy_name = "Unknown"
-            pcall(function() strategy_name = df.plot_strategy_type[actor.strategy] or "Unknown" end)
-            table.insert(data.actors, {
-                hf_1 = actor.hf_1,
-                hf_2 = actor.hf_2,
-                role_name = role_name,
-                strategy_name = strategy_name,
-                handle_actor_id = actor.handle_actor_id,
-                active_plot_ids = actor.active_plot_id,
-            })
-            data.actor_count = data.actor_count + 1
+            if actor then
+                local role_name = "Unknown"
+                pcall(function() role_name = df.plot_role_type[actor.role] or "Unknown" end)
+                local strategy_name = "Unknown"
+                pcall(function() strategy_name = df.plot_strategy_type[actor.strategy] or "Unknown" end)
+                
+                local hf_1, hf_2, handle_actor_id, active_plot_ids = -1, -1, -1, nil
+                pcall(function()
+                    hf_1 = actor.hf_1
+                    hf_2 = actor.hf_2
+                    handle_actor_id = actor.handle_actor_id
+                    active_plot_ids = actor.active_plot_id
+                end)
+                
+                table.insert(data.actors, {
+                    hf_1 = hf_1,
+                    hf_2 = hf_2,
+                    role_name = role_name,
+                    strategy_name = strategy_name,
+                    handle_actor_id = handle_actor_id,
+                    active_plot_ids = active_plot_ids,
+                })
+                data.actor_count = data.actor_count + 1
+            end
         end
     end
 
@@ -1156,19 +1331,24 @@ end
 -- ===========================
 
 function getCrimeName(mode)
-    local manual_fallback = {
-        [0] = "Murder", [1] = "Assault", [2] = "Blood Drinking", [3] = "Theft", 
-        [4] = "Vandalism", [5] = "Battery", [6] = "Disorderly Conduct", 
-        [7] = "Conspiracy", [8] = "Production Mandate Violation", 
-        [9] = "Export Mandate Violation", [17] = "Treason / Artifact Theft"
-    }
-    if manual_fallback[mode] then return manual_fallback[mode] end
-
+    -- Try the enum first (most accurate)
     local raw = df.crime_type and df.crime_type[mode]
     if raw then
-        raw = string.gsub(raw, "_", " ")
-        raw = string.gsub(raw, "(%a)([%w]*)", function(a,b) return string.upper(a)..string.lower(b) end)
-        return raw
+        -- Provide readable names for common crime types
+        local readable = {
+            ProductionOrderViolation = "Production Mandate Violation",
+            ExportViolation = "Export Mandate Violation",
+            JobOrderViolation = "Job Order Violation",
+            ConspiracyToSlowLabor = "Conspiracy to Slow Labor",
+            DisorderlyBehavior = "Disorderly Conduct",
+            BuildingDestruction = "Building Destruction",
+            BloodDrinking = "Blood Drinking",
+            AttemptedMurder = "Attempted Murder",
+            AttemptedKidnapping = "Attempted Kidnapping",
+            AttemptedTheft = "Attempted Theft",
+            Treason = "Treason / Artifact Theft",
+        }
+        return readable[raw] or raw
     end
     
     return "Unknown Crime (Type " .. tostring(mode) .. ")"
@@ -1181,27 +1361,203 @@ function JusticeHQ:buildEvidence(s)
     -- 1. Intrigue perspective (Fort Mode espionage data)
     local hf = df.historical_figure.find(s.unit.hist_figure_id)
     local idata = hf and getHfIntrigueData(hf)
+    local player_site = -1
+    local player_entity = -1
+    pcall(function() player_site = df.global.plotinfo.site_id end)
+    pcall(function() player_entity = df.global.plotinfo.civ_id end)
+
+    -- Tiered plot scoring tables
+    local PLOT_SCORE = {
+        -- Tier 1: Real fort-mode threats
+        Acquire_Artifact = 120,       -- verified via artifact.site
+        Infiltrate_Society = 60,      -- verified via entity_links
+        Grow_Corruption_Network = 40,
+        Grow_Asset_Network = 25,
+        -- Tier 2: Indirect / political
+        Attain_Rank = 30,
+        Frame_Actor = 25,
+        Corruptly_Punish_Actor = 20,
+        Corrupt_Actors_Government = 20,
+        Grow_Funding_Network = 10,
+        -- Tier 3: World-level (do not execute in fortress mode)
+        Assassinate_Actor = 5,
+        Kidnap_Actor = 5,
+        Direct_War_To_Actor = 5,
+        Sabotage_Actor = 5,
+        Counterintelligence = 5,
+        Become_Immortal = 5,
+        Undead_World_Conquest = 5,
+    }
+    local PLOT_DESC = {
+        Acquire_Artifact = "Plotting to steal a specific fortress artifact.",
+        Infiltrate_Society = "Embedding covert agents to gather intelligence and undermine governance.",
+        Grow_Corruption_Network = "Recruiting corrupt officials to serve as informants and co-conspirators.",
+        Grow_Asset_Network = "Building an operative network to provide logistical support for larger operations.",
+        Attain_Rank = "Manipulating fortress politics to gain a position of authority.",
+        Frame_Actor = "Planting false evidence to trigger wrongful convictions.",
+        Corruptly_Punish_Actor = "Abusing a position of authority to unjustly punish someone.",
+        Corrupt_Actors_Government = "Undermining civilization-level governance through bribery and coercion.",
+        Grow_Funding_Network = "Soliciting financial backing from wealthy contacts.",
+        Assassinate_Actor = "World-level assassination plot. Does not execute against fortress residents.",
+        Kidnap_Actor = "World-level abduction plot. No in-fortress abductions expected.",
+        Direct_War_To_Actor = "World-level military redirection. Does not directly affect fortress defense.",
+        Sabotage_Actor = "World-level sabotage operation. No in-fortress destruction expected.",
+        Counterintelligence = "Defensive counter-spy operations. Detecting enemy spies, not attacking.",
+        Become_Immortal = "Pursuing personal immortality. No direct fortress impact.",
+        Undead_World_Conquest = "Raising undead forces on the world stage. Long-term existential threat.",
+    }
+    local PLOT_COLOR = {
+        Acquire_Artifact = COLOR_LIGHTRED,
+        Infiltrate_Society = COLOR_LIGHTMAGENTA,
+        Grow_Corruption_Network = COLOR_YELLOW,
+        Grow_Asset_Network = COLOR_YELLOW,
+        Attain_Rank = COLOR_YELLOW,
+        Frame_Actor = COLOR_LIGHTMAGENTA,
+        Corruptly_Punish_Actor = COLOR_YELLOW,
+        Corrupt_Actors_Government = COLOR_YELLOW,
+        Grow_Funding_Network = COLOR_BROWN,
+        Assassinate_Actor = COLOR_DARKGREY,
+        Kidnap_Actor = COLOR_DARKGREY,
+        Direct_War_To_Actor = COLOR_DARKGREY,
+        Sabotage_Actor = COLOR_DARKGREY,
+        Counterintelligence = COLOR_DARKGREY,
+        Become_Immortal = COLOR_DARKGREY,
+        Undead_World_Conquest = COLOR_DARKGREY,
+    }
+
     if hf then
         if idata and idata.is_villain then
-            -- Score active plots
+            -- Score plots with tiered system
             for _, plot in ipairs(idata.plots) do
-                if not plot.on_hold then
-                    local pts = 100
-                    score = score + pts
-                    table.insert(evidence, {
-                        text = "Active plot: " .. plot.type_name:gsub("_", " "),
-                        detail = "This person is actively running an espionage operation against your fortress.",
-                        pts = pts, color = COLOR_LIGHTRED,
-                    })
-                else
-                    local pts = 20
-                    score = score + pts
-                    table.insert(evidence, {
-                        text = "Plot on hold: " .. plot.type_name:gsub("_", " "),
-                        detail = "A dormant plot that could reactivate at any time.",
-                        pts = pts, color = COLOR_YELLOW,
-                    })
+                local type_key = plot.type_name
+                local base_pts = PLOT_SCORE[type_key] or 10
+                local desc = PLOT_DESC[type_key] or "Unknown plot type."
+                local color = PLOT_COLOR[type_key] or COLOR_YELLOW
+                local label_prefix = "Active plot: "
+
+                if plot.on_hold then
+                    -- On-hold plots get reduced scoring
+                    base_pts = math.max(math.floor(base_pts * 0.2), 5)
+                    label_prefix = "Plot on hold: "
+                    color = COLOR_DARKGREY
+                    desc = "Dormant plot. Could reactivate."
                 end
+
+                local op_notes = {}
+                -- Tier 1 verification: Acquire_Artifact — check if artifact is at our site
+                if type_key == "Acquire_Artifact" and plot.parameter > 0 and not plot.on_hold then
+                    local art_name = "unknown artifact"
+                    local at_our_site = false
+                    pcall(function()
+                        local artifact = df.artifact_record.find(plot.parameter)
+                        if artifact then
+                            pcall(function() 
+                                local translated = dfhack.translation.translateName(artifact.name, true)
+                                local untranslated = dfhack.translation.translateName(artifact.name, false)
+                                if translated ~= "" and untranslated ~= "" and translated ~= untranslated then
+                                    art_name = translated .. " '" .. untranslated .. "'"
+                                elseif translated ~= "" then
+                                    art_name = translated
+                                elseif untranslated ~= "" then
+                                    art_name = untranslated
+                                end
+                            end)
+                            
+                            -- Extract the actual item type (e.g. "pig tail turban")
+                            pcall(function()
+                                if artifact.item then
+                                    local item = df.item.find(artifact.item.id)
+                                    if item then
+                                        local item_desc = dfhack.items.getDescription(item, 0, true)
+                                        art_name = art_name .. " (" .. item_desc .. ")"
+                                    end
+                                elseif artifact.item_id and artifact.item_id >= 0 then
+                                    local item = df.item.find(artifact.item_id)
+                                    if item then
+                                        local item_desc = dfhack.items.getDescription(item, 0, true)
+                                        art_name = art_name .. " (" .. item_desc .. ")"
+                                    end
+                                end
+                            end)
+                            
+                            at_our_site = (artifact.site == player_site)
+                        end
+                    end)
+                    if at_our_site then
+                        base_pts = 120
+                        desc = "Targeting fortress artifact '" .. art_name .. "' for theft. Immediate interception recommended."
+                        color = COLOR_LIGHTRED
+                        table.insert(op_notes, "Direct Threat: Targeting an artifact currently at your fortress.")
+                    else
+                        base_pts = 30
+                        desc = "Seeking artifact '" .. art_name .. "' located elsewhere. Not a direct fortress threat."
+                        color = COLOR_GREY
+                    end
+                end
+
+                -- Tier 1 verification: Infiltrate_Society — check if targeting our site government
+                if type_key == "Infiltrate_Society" and plot.parameter > 0 and not plot.on_hold then
+                    local targets_us = false
+                    local ent_name = "unknown"
+                    pcall(function()
+                        local target_ent = df.historical_entity.find(plot.parameter)
+                        if target_ent then
+                            pcall(function() ent_name = dfhack.translation.translateName(target_ent.name, true) end)
+                            if target_ent.entity_links then
+                                for _, link in ipairs(target_ent.entity_links) do
+                                    if link.target == player_entity then
+                                        targets_us = true
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end)
+                    if targets_us then
+                        base_pts = 60
+                        desc = "Infiltrating our site government ('" .. ent_name .. "'). Covert agents are embedding into the population."
+                        color = COLOR_LIGHTMAGENTA
+                    else
+                        base_pts = 15
+                        desc = "Infiltrating '" .. ent_name .. "' (external organization)."
+                        color = COLOR_GREY
+                    end
+                end
+
+                -- Context bonuses for active plots
+                local context_bonus = 0
+                if not plot.on_hold then
+                    if plot.actor_nemesis_id > 0 then
+                        context_bonus = context_bonus + 20
+                        local agent_name = "an operative"
+                        pcall(function()
+                            local nem = df.nemesis_record.find(plot.actor_nemesis_id)
+                            if nem and nem.figure then
+                                local translated = dfhack.translation.translateName(nem.figure.name, true)
+                                if translated ~= "" then agent_name = "'" .. translated .. "'" end
+                            end
+                        end)
+                        table.insert(op_notes, "Operative Deployed: " .. agent_name .. " is actively executing this plot.")
+                    end
+                    if plot.agreement > 0 then
+                        context_bonus = context_bonus + 15
+                        table.insert(op_notes, "Deal Finalized: A concrete agreement is in place.")
+                    end
+                    if plot.parent_plot > 0 then
+                        context_bonus = context_bonus + 10
+                        table.insert(op_notes, "Conspiracy Chain: Linked to a larger master operation.")
+                    end
+                end
+
+                local pts = base_pts + context_bonus
+                score = score + pts
+                
+                table.insert(evidence, {
+                    text = label_prefix .. plot.type_name:gsub("_", " "),
+                    detail = desc,
+                    op_notes = op_notes,
+                    pts = pts, color = color,
+                })
             end
             -- Score network size
             if idata.actor_count > 0 then
@@ -1210,6 +1566,7 @@ function JusticeHQ:buildEvidence(s)
                 table.insert(evidence, {
                     text = "Maintains intelligence network (" .. idata.actor_count .. " actors)",
                     detail = "This person coordinates other agents operating in your fortress.",
+                    op_notes = {},
                     pts = pts, color = COLOR_YELLOW,
                 })
             end
@@ -1532,14 +1889,14 @@ function JusticeHQ:buildChoices()
                 table.insert(text_arr, {text = "  [CONVICTABLE]", pen = COLOR_LIGHTRED})
             end
             table.insert(text_arr, NEWLINE)
-            table.insert(text_arr, {text = "   Threat: ", pen = COLOR_GREY})
+            table.insert(text_arr, {text = "   Threat: ", pen = COLOR_DARKGREY})
             table.insert(text_arr, {text = string.upper(s.threat), pen = threat_color})
-            table.insert(text_arr, {text = string.format(" [%d pts]                     ", s.score), pen = COLOR_GREY})
-            table.insert(text_arr, {text = (earliest_year and ("Y." .. earliest_year) or ""), pen = COLOR_GREY})
+            table.insert(text_arr, {text = string.format(" [%d pts]                     ", s.score), pen = COLOR_DARKGREY})
+            table.insert(text_arr, {text = (earliest_year and ("Y." .. earliest_year) or ""), pen = COLOR_BROWN})
             table.insert(text_arr, NEWLINE)
-            table.insert(text_arr, {text = string.format("   %-35s", crimes_summary), pen = COLOR_DARKGREY})
-            table.insert(text_arr, {text = top_strategy ~= "" and top_strategy or "", pen = top_strategy == "Assassinate" and COLOR_LIGHTRED or COLOR_YELLOW})
-            table.insert(text_arr, {text = cell_str ~= "" and ("  " .. cell_str) or "", pen = COLOR_DARKGREY})
+            table.insert(text_arr, {text = string.format("   %-35s", crimes_summary), pen = COLOR_GREY})
+            table.insert(text_arr, {text = top_strategy ~= "" and top_strategy or "", pen = STRATEGY_COLORS[top_strategy and top_strategy:gsub(" ", "_") or ""] or COLOR_YELLOW})
+            table.insert(text_arr, {text = cell_str ~= "" and ("  " .. cell_str) or "", pen = COLOR_CYAN})
             local searchable = string.lower(s.name .. " " .. s.prof .. " " .. crimes_summary)
             table.insert(list_choices, {
                 text = text_arr,
@@ -1610,9 +1967,20 @@ function JusticeHQ:setListChoices(list_view, choices, id_func)
     if GLOBAL_SELECTED_SUSPECT_ID then
         for i, choice in ipairs(choices) do
             local uid
-            if id_func then uid = id_func(choice)
-            elseif choice.data and choice.data.unit then uid = choice.data.unit.id
-            elseif choice.data and choice.data.accused then uid = choice.data.accused
+            if id_func then 
+                uid = id_func(choice)
+            elseif choice.data then
+                if type(choice.data) == 'table' then
+                    if choice.data.unit then uid = choice.data.unit.id
+                    elseif choice.data.accused then uid = choice.data.accused
+                    end
+                elseif type(choice.data) == 'userdata' then
+                    pcall(function()
+                        if tostring(choice.data._type):find('crime') then
+                            uid = choice.data.accused
+                        end
+                    end)
+                end
             end
             if uid == GLOBAL_SELECTED_SUSPECT_ID then
                 selected_idx = i
@@ -1857,12 +2225,37 @@ function JusticeHQ:buildIntelChoices()
         local text_arr = {}
         for _, p in ipairs(line1_parts) do table.insert(text_arr, p) end
         table.insert(text_arr, NEWLINE)
-        table.insert(text_arr, {text = '   Officer: ', pen = COLOR_GREY})
-        table.insert(text_arr, {text = e.officer_str, pen = COLOR_WHITE})
+        table.insert(text_arr, {text = '   Officer: ', pen = COLOR_DARKGREY})
+        table.insert(text_arr, {text = e.officer_str, pen = COLOR_CYAN})
         table.insert(text_arr, NEWLINE)
         table.insert(text_arr, {text = '   ', pen = COLOR_GREY})
         table.insert(text_arr, {text = e.outcome_label, pen = e.outcome_color})
-        table.insert(text_arr, {text = '  ' .. e.method_name .. '  |  ' .. confession_summary, pen = COLOR_DARKGREY})
+        table.insert(text_arr, {text = '  ' .. e.method_name, pen = COLOR_GREY})
+        table.insert(text_arr, {text = '  |  ', pen = COLOR_DARKGREY})
+        -- Colorize confession summary items individually
+        if e.intel_count > 0 then
+            local parts = {}
+            if e.has_confessions then
+                table.insert(parts, {text = #e.report.confessed_target_crime_id .. ' crimes', pen = COLOR_LIGHTRED})
+            end
+            if e.has_identities then
+                table.insert(parts, {text = #e.report.confessed_identity_id .. ' identities', pen = COLOR_LIGHTMAGENTA})
+            end
+            if e.has_agreements then
+                table.insert(parts, {text = #e.report.revealed_agreement_id .. ' plots', pen = COLOR_YELLOW})
+            end
+            if e.has_events then
+                table.insert(parts, {text = #e.report.revealed_event_id .. ' events', pen = COLOR_LIGHTCYAN})
+            end
+            for i, p in ipairs(parts) do
+                table.insert(text_arr, p)
+                if i < #parts then
+                    table.insert(text_arr, {text = ', ', pen = COLOR_DARKGREY})
+                end
+            end
+        else
+            table.insert(text_arr, {text = 'No new information', pen = COLOR_DARKGREY})
+        end
         table.insert(text_arr, NEWLINE)
 
         local searchable = string.lower(e.subject_name .. ' ' .. e.subject_occ .. ' ' .. e.officer_str .. ' ' .. e.outcome_label)
@@ -2113,10 +2506,12 @@ function JusticeHQ:buildCaseChoices()
             local text_arr = {
                 {text = " " .. string.format("%-8s", status), pen = color},
                 {text = string.format("%-45s", crime_name), pen = COLOR_WHITE},
-                {text = crime_date, pen = COLOR_GREY},
+                {text = crime_date, pen = COLOR_BROWN},
                 NEWLINE,
-                {text = "         "},
-                {text = detail_str, pen = COLOR_DARKGREY},
+                {text = "         Accused: ", pen = COLOR_DARKGREY},
+                {text = accused_name, pen = COLOR_YELLOW},
+                {text = victim_name ~= "Unknown" and ("   Victim: ") or "", pen = COLOR_DARKGREY},
+                {text = victim_name ~= "Unknown" and victim_name or "", pen = COLOR_LIGHTCYAN},
             }
             local searchable = string.lower(crime_name .. " " .. accused_name .. " " .. victim_name)
             
@@ -2174,26 +2569,42 @@ function JusticeHQ:buildConvictChoices()
     local filter = self.convict_filter_level or 1
     
     local convicts_data = {}
+    local convict_map = {}
     
     for _, punishment in ipairs(df.global.plotinfo.punishments) do
-        local unit = df.unit.find(punishment.criminal)
+        local is_active = (punishment.prison_counter > 0) or (punishment.beating > 0) or (punishment.hammer_strikes > 0)
+        if is_active then
+            if not convict_map[punishment.criminal] then
+                convict_map[punishment.criminal] = {
+                    prison = 0,
+                    beating = 0,
+                    hammer = 0,
+                    raw = punishment
+                }
+            end
+            convict_map[punishment.criminal].prison = convict_map[punishment.criminal].prison + punishment.prison_counter
+            convict_map[punishment.criminal].beating = convict_map[punishment.criminal].beating + punishment.beating
+            convict_map[punishment.criminal].hammer = convict_map[punishment.criminal].hammer + punishment.hammer_strikes
+        end
+    end
+    
+    for criminal_id, p_data in pairs(convict_map) do
+        local unit = df.unit.find(criminal_id)
         if unit then
-            local is_active = (punishment.prison_counter > 0) or (punishment.beating > 0) or (punishment.hammer_strikes > 0)
-            
             -- Filter logic
             local show = false
-            if filter == 1 and is_active then show = true end
-            if filter == 2 and punishment.prison_counter > 0 then show = true end
-            if filter == 3 and (punishment.beating > 0 or punishment.hammer_strikes > 0) then show = true end
+            if filter == 1 then show = true end
+            if filter == 2 and p_data.prison > 0 then show = true end
+            if filter == 3 and (p_data.beating > 0 or p_data.hammer > 0) then show = true end
             
             if show then
-                local days = math.ceil((punishment.prison_counter * TICKS_PER_SEASON_TICK) / TICKS_PER_DAY)
+                local days = math.ceil((p_data.prison * TICKS_PER_SEASON_TICK) / TICKS_PER_DAY)
                 local name = dfhack.units.getReadableName(unit)
                 
                 local sentence_str = ""
-                if punishment.prison_counter > 0 then sentence_str = sentence_str .. days .. " days in prison. " end
-                if punishment.beating > 0 then sentence_str = sentence_str .. punishment.beating .. " beatings pending. " end
-                if punishment.hammer_strikes > 0 then sentence_str = sentence_str .. punishment.hammer_strikes .. " hammer strikes pending. " end
+                if p_data.prison > 0 then sentence_str = sentence_str .. days .. " days in prison. " end
+                if p_data.beating > 0 then sentence_str = sentence_str .. p_data.beating .. " beatings pending. " end
+                if p_data.hammer > 0 then sentence_str = sentence_str .. p_data.hammer .. " hammer strikes pending. " end
                 
                 -- Find most recent crime date for this convict
                 local crime_date_str = ""
@@ -2246,16 +2657,36 @@ function JusticeHQ:buildConvictChoices()
                     {text = cat_badge, pen = badge_color},
                     NEWLINE,
                     {text = " " .. string.char(23) .. " ", pen = COLOR_YELLOW},
-                    {text = string.format("%-45s", sentence_str), pen = COLOR_LIGHTRED},
-                    {text = crime_date_str, pen = COLOR_DARKGREY},
                 }
+                -- Colorize sentence components individually
+                if p_data.prison > 0 then
+                    table.insert(text_arr, {text = days .. " days in prison", pen = COLOR_LIGHTCYAN})
+                    if p_data.beating > 0 or p_data.hammer > 0 then
+                        table.insert(text_arr, {text = ", ", pen = COLOR_DARKGREY})
+                    else
+                        table.insert(text_arr, {text = " ", pen = COLOR_DARKGREY})
+                    end
+                end
+                if p_data.beating > 0 then
+                    table.insert(text_arr, {text = p_data.beating .. " beatings", pen = COLOR_YELLOW})
+                    if p_data.hammer > 0 then
+                        table.insert(text_arr, {text = ", ", pen = COLOR_DARKGREY})
+                    else
+                        table.insert(text_arr, {text = " ", pen = COLOR_DARKGREY})
+                    end
+                end
+                if p_data.hammer > 0 then
+                    table.insert(text_arr, {text = p_data.hammer .. " hammer strikes", pen = COLOR_LIGHTRED})
+                    table.insert(text_arr, {text = " ", pen = COLOR_DARKGREY})
+                end
+                table.insert(text_arr, {text = crime_date_str, pen = COLOR_BROWN})
                 local searchable = string.lower(name .. " " .. suspect_data.prof)
 
                 table.insert(convicts_data, {
                     display_arr = text_arr,
                     searchable = searchable,
                     suspect_data = suspect_data,
-                    raw_punishment = punishment,
+                    raw_punishment = p_data.raw,
                     days = days,
                     name = name,
                 })
@@ -2675,7 +3106,7 @@ function JusticeHQ:buildNetworkChoices()
             local status_color = plot.on_hold and COLOR_DARKGREY or COLOR_LIGHTRED
             local plot_text = {
                 {text = "   " .. string.char(16) .. " Plot: ", pen = COLOR_DARKGREY},
-                {text = plot.type_name:gsub("_", " "), pen = COLOR_YELLOW},
+                {text = plot.type_name:gsub("_", " "), pen = PLOT_COLORS[plot.type_name] or COLOR_YELLOW},
                 {text = status, pen = status_color},
             }
             table.insert(list_choices, {text = plot_text, data = nil, tooltip_info = {type = 'plot', plot_type = plot.type_name, on_hold = plot.on_hold}})
@@ -2713,10 +3144,11 @@ function JusticeHQ:buildNetworkChoices()
             
             local text_arr = {
                 {text = string.format("   %s %-32s ", string.char(16), target_name), pen = COLOR_WHITE},
-                {text = string.format("%-22s ", role_display), pen = COLOR_LIGHTRED},
+                {text = string.format("%-22s ", role_display), pen = ROLE_COLORS[actor.role_name] or COLOR_LIGHTRED},
                 {text = cat_badge, pen = badge_color},
                 NEWLINE,
-                {text = string.format("       Strategy: %s", strategy_display), pen = COLOR_DARKGREY},
+                {text = "       Strategy: ", pen = COLOR_DARKGREY},
+                {text = strategy_display, pen = STRATEGY_COLORS[actor.strategy_name] or COLOR_GREY},
             }
             -- Investigation progress markers
             local marker_added = false
@@ -2932,14 +3364,16 @@ function JusticeHQ:onSelectNetwork(idx, choice)
                 local desc = PLOT_TOOLTIPS[info.plot_type]
                 if desc then
                     local display_name = info.plot_type:gsub('_', ' ')
-                    guidance:setText({{text = display_name .. ': ', pen = COLOR_YELLOW}, {text = desc, pen = COLOR_DARKGREY}})
+                    local plot_color = PLOT_COLORS[info.plot_type] or COLOR_YELLOW
+                    guidance:setText({{text = display_name .. ': ', pen = plot_color}, {text = desc, pen = COLOR_GREY}})
                     return
                 end
             elseif info.type == 'actor' then
                 local role_desc = ROLE_TOOLTIPS[info.role]
                 if role_desc then
                     local display_role = info.role:gsub('_', ' ')
-                    guidance:setText({{text = display_role .. ': ', pen = COLOR_LIGHTRED}, {text = role_desc, pen = COLOR_DARKGREY}})
+                    local role_color = ROLE_COLORS[info.role] or COLOR_LIGHTRED
+                    guidance:setText({{text = display_role .. ': ', pen = role_color}, {text = role_desc, pen = COLOR_GREY}})
                     return
                 end
             end
@@ -2999,7 +3433,20 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
     local hf = df.historical_figure.find(s.unit.hist_figure_id)
     if hf then
         local idata = getHfIntrigueData(hf)
-        if idata.is_villain then
+        if idata.no_armok_locked then
+            table.insert(lines, NEWLINE)
+            table.insert(lines, {text = string.char(196):rep(40), pen = COLOR_DARKGREY})
+            table.insert(lines, NEWLINE)
+            table.insert(lines, {text = "INTELLIGENCE NETWORK:", pen = COLOR_LIGHTBLUE})
+            table.insert(lines, NEWLINE)
+            table.insert(lines, NEWLINE)
+            table.insert(lines, {text = "  [ CLASSIFIED ]", pen = COLOR_LIGHTRED})
+            table.insert(lines, NEWLINE)
+            table.insert(lines, {text = "  Subject has not confessed to espionage.", pen = COLOR_DARKGREY})
+            table.insert(lines, NEWLINE)
+            table.insert(lines, {text = "  Interrogation required to reveal network.", pen = COLOR_DARKGREY})
+            table.insert(lines, NEWLINE)
+        elseif idata.is_villain then
             table.insert(lines, NEWLINE)
             table.insert(lines, {text = string.char(196):rep(40), pen = COLOR_DARKGREY})
             table.insert(lines, NEWLINE)
@@ -3015,7 +3462,7 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
                     local status = plot.on_hold and " [ON HOLD]" or " [ACTIVE]"
                     local status_color = plot.on_hold and COLOR_DARKGREY or COLOR_LIGHTRED
                     table.insert(lines, {text = " " .. string.char(16) .. " ", pen = COLOR_DARKGREY})
-                    table.insert(lines, {text = plot.type_name:gsub("_", " "), pen = COLOR_YELLOW})
+                    table.insert(lines, {text = plot.type_name:gsub("_", " "), pen = PLOT_COLORS[plot.type_name] or COLOR_YELLOW})
                     table.insert(lines, {text = status, pen = status_color})
                     table.insert(lines, NEWLINE)
                 end
@@ -3044,10 +3491,10 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
                     local strategy_display = actor.strategy_name:gsub("_", " ")
                     table.insert(lines, {text = " " .. string.char(16) .. " ", pen = COLOR_DARKGREY})
                     table.insert(lines, {text = target_name, pen = COLOR_WHITE})
-                    table.insert(lines, {text = " <" .. role_display .. ">", pen = COLOR_LIGHTRED})
+                    table.insert(lines, {text = " <" .. role_display .. ">", pen = ROLE_COLORS[actor.role_name] or COLOR_LIGHTRED})
                     table.insert(lines, NEWLINE)
                     table.insert(lines, {text = "   Strategy: ", pen = COLOR_DARKGREY})
-                    table.insert(lines, {text = strategy_display, pen = COLOR_GREY})
+                    table.insert(lines, {text = strategy_display, pen = STRATEGY_COLORS[actor.strategy_name] or COLOR_GREY})
                     table.insert(lines, NEWLINE)
                 end
             end
@@ -3088,21 +3535,80 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
 
     if s.evidence and #s.evidence > 0 then
         for i, ev in ipairs(s.evidence) do
-            local prefix = " " .. string.char(16) .. " "
+            -- Fixed-width point prefix for alignment
+            local pts_str
             if ev.pts > 0 then
-                prefix = prefix .. "[+" .. ev.pts .. "] "
+                pts_str = string.format("+%d", ev.pts)
             elseif ev.pts < 0 then
-                prefix = prefix .. "[" .. ev.pts .. "] "
+                pts_str = string.format("%d", ev.pts)
             else
-                prefix = prefix .. "[---] "
+                pts_str = "---"
             end
-            table.insert(lines, {text = prefix, pen = COLOR_DARKGREY})
+            local prefix = " " .. string.char(16) .. " [" .. string.format("%-4s", pts_str) .. "] "
+            -- Color the point bracket by severity
+            local pts_color = COLOR_DARKGREY
+            if ev.pts >= 100 then pts_color = COLOR_LIGHTRED
+            elseif ev.pts >= 50 then pts_color = COLOR_YELLOW
+            elseif ev.pts >= 15 then pts_color = COLOR_CYAN
+            elseif ev.pts < 0 then pts_color = COLOR_GREEN
+            end
+            table.insert(lines, {text = prefix, pen = pts_color})
             table.insert(lines, {text = ev.text, pen = ev.color})
             table.insert(lines, NEWLINE)
             if ev.detail then
-                table.insert(lines, {text = "       " .. ev.detail, pen = COLOR_DARKGREY})
-                table.insert(lines, NEWLINE)
+                -- Word-wrap detail text at ~68 chars to fit window
+                local indent = "       "
+                local max_w = 68
+                local words = {}
+                for w in ev.detail:gmatch("%S+") do table.insert(words, w) end
+                local cur_line = indent
+                for _, w in ipairs(words) do
+                    if #cur_line + 1 + #w > max_w and cur_line ~= indent then
+                        table.insert(lines, {text = cur_line, pen = COLOR_GREY})
+                        table.insert(lines, NEWLINE)
+                        cur_line = indent .. w
+                    else
+                        if cur_line == indent then
+                            cur_line = cur_line .. w
+                        else
+                            cur_line = cur_line .. " " .. w
+                        end
+                    end
+                end
+                if cur_line ~= indent then
+                    table.insert(lines, {text = cur_line, pen = COLOR_GREY})
+                    table.insert(lines, NEWLINE)
+                end
             end
+            
+            if ev.op_notes and #ev.op_notes > 0 then
+                for _, note in ipairs(ev.op_notes) do
+                    local indent = "         " -- 9 spaces for bullet
+                    local max_w = 68
+                    local words = {}
+                    for w in note:gmatch("%S+") do table.insert(words, w) end
+                    local cur_line = "       * " -- starting bullet
+                    for _, w in ipairs(words) do
+                        if #cur_line + 1 + #w > max_w and cur_line ~= "       * " and cur_line ~= indent then
+                            table.insert(lines, {text = cur_line, pen = COLOR_LIGHTGREEN})
+                            table.insert(lines, NEWLINE)
+                            cur_line = indent .. w
+                        else
+                            if cur_line == "       * " or cur_line == indent then
+                                cur_line = cur_line .. w
+                            else
+                                cur_line = cur_line .. " " .. w
+                            end
+                        end
+                    end
+                    if cur_line ~= "       * " and cur_line ~= indent then
+                        table.insert(lines, {text = cur_line, pen = COLOR_LIGHTGREEN})
+                        table.insert(lines, NEWLINE)
+                    end
+                end
+            end
+            -- Blank line between evidence entries
+            table.insert(lines, NEWLINE)
         end
     else
         table.insert(lines, {text = "  No evidence on file.", pen = COLOR_DARKGREY})
@@ -3606,7 +4112,7 @@ function JusticeHQ:serializeCurrentTab()
         tab_name = list_map[page].name
         local list = self.subviews[list_map[page].view]
         if list then
-            for _, choice in ipairs(list:getChoices()) do
+            for _, choice in ipairs(list:getVisibleChoices()) do
                 if choice.text then
                     local line = self:serializeChoiceToLine(choice.text)
                     if line ~= '' then
@@ -4070,15 +4576,23 @@ function JusticeHQ:onPardon()
     local unit_id = unit.id
     local self_ref = self
     
-    dialogs.showYesNoPrompt(
-        'CI-HQ: Pardon Suspect',
-        'Are you sure you want to fully pardon ' .. name .. '?\n\n' ..
-        'This will instantly clear all pending and active sentences,\n' ..
-        'including beatings, hammer strikes, and imprisonment.\n' ..
-        'If the suspect is currently chained, they will be released.\n\n' ..
-        'This action cannot be undone.',
-        COLOR_LIGHTCYAN,
-        function()
+    local dialog
+    dialog = dialogs.DialogScreen{
+        title = 'CI-HQ: Pardon Suspect',
+        message_label_attrs = {
+            frame = {t=0, l=0, b=4},
+            text = 'Are you sure you want to fully pardon ' .. name .. '?\n\n' ..
+                   'This will instantly clear all pending and active sentences,\n' ..
+                   'including beatings, hammer strikes, and imprisonment.\n' ..
+                   'If the suspect is currently chained, they will be released.\n\n' ..
+                   'This action cannot be undone.',
+            text_pen = COLOR_LIGHTCYAN,
+        },
+        accept_hotkey_label_attrs = {
+            label = 'Yes, pardon',
+            frame = {b=0, l=0},
+        },
+        on_accept = function()
             local target = df.unit.find(unit_id)
             if not target then return end
             
@@ -4103,8 +4617,19 @@ function JusticeHQ:onPardon()
             else
                 cihq_announce("CI-HQ: Suspect is not currently serving a sentence.", COLOR_GREY, true)
             end
-        end
-    )
+        end,
+        on_cancel = function() end,
+        subviews = {
+            widgets.HotkeyLabel{
+                frame = {b=0, r=0},
+                label = 'No, abort',
+                key = 'LEAVESCREEN',
+                auto_width = true,
+                on_activate = function() dialog:dismiss() end,
+            }
+        }
+    }
+    dialog:show()
 end
 
 function JusticeHQ:onExecute()
@@ -4148,17 +4673,25 @@ function JusticeHQ:onExecute()
         local name = dfhack.units.getReadableName(unit)
         local unit_id = unit.id
         local self_ref = self
-        dialogs.showYesNoPrompt(
-            'CI-HQ: Extrajudicial Execution',
-            'Target: ' .. name .. '\n\n' ..
-            'This suspect is a non-citizen visitor. The dwarven justice\n' ..
-            'system cannot sentence foreign nationals - any punishment\n' ..
-            'order will be ignored by the Hammerer.\n\n' ..
-            'CI-HQ can bypass the justice system and execute this\n' ..
-            'suspect directly. This action cannot be undone.\n\n' ..
-            'Authorize extrajudicial execution?',
-            COLOR_LIGHTRED,
-            function()
+        local dialog
+        dialog = dialogs.DialogScreen{
+            title = 'CI-HQ: Extrajudicial Execution',
+            message_label_attrs = {
+                frame = {t=0, l=0, b=4},
+                text = 'Target: ' .. name .. '\n\n' ..
+                       'This suspect is a non-citizen visitor. The dwarven justice\n' ..
+                       'system cannot sentence foreign nationals - any punishment\n' ..
+                       'order will be ignored by the Hammerer.\n\n' ..
+                       'CI-HQ can bypass the justice system and execute this\n' ..
+                       'suspect directly. This action cannot be undone.\n\n' ..
+                       'Authorize extrajudicial execution?',
+                text_pen = COLOR_LIGHTRED,
+            },
+            accept_hotkey_label_attrs = {
+                label = 'Yes, execute',
+                frame = {b=0, l=0},
+            },
+            on_accept = function()
                 local target = df.unit.find(unit_id)
                 if not target or not dfhack.units.isActive(target) then
                     cihq_announce("CI-HQ: Target has left the map. Execution aborted.", COLOR_RED, true)
@@ -4169,8 +4702,19 @@ function JusticeHQ:onExecute()
                 cihq_announce("CI-HQ: " .. name .. " has been executed by order of the fortress!", COLOR_LIGHTRED, true)
                 CRIME_CACHE = nil
                 self_ref:refreshCurrentDossier()
-            end
-        )
+            end,
+            on_cancel = function() end,
+            subviews = {
+                widgets.HotkeyLabel{
+                    frame = {b=0, r=0},
+                    label = 'No, abort',
+                    key = 'LEAVESCREEN',
+                    auto_width = true,
+                    on_activate = function() dialog:dismiss() end,
+                }
+            }
+        }
+        dialog:show()
         return -- Don't refresh yet, wait for player confirmation
     end
     self:refreshCurrentDossier()
@@ -4214,21 +4758,40 @@ function JusticeHQ:onInterrogate()
     if interrogation_watchlist[uid] then
         local watch = interrogation_watchlist[uid]
         if watch.status == 'active' or watch.status == 'dispatched' then
-            dialogs.showYesNoPrompt(
-                'Cancel Interrogation?',
-                'Are you sure you want to cancel the interrogation loop on ' .. suspect.first_name .. '?\n\n' ..
-                'Reason: Manual cancellation requested.\n' ..
-                'Current Status: ' .. watch.status:upper() .. '\n' ..
-                'Attempts so far: ' .. (watch.retries or 0) .. '/' .. watch.max_retries .. '\n\n' ..
-                'The Captain of the Guard will stop re-dispatching to this suspect.',
-                COLOR_YELLOW,
-                function()
+            local dialog
+            dialog = dialogs.DialogScreen{
+                title = 'Cancel Interrogation?',
+                message_label_attrs = {
+                    frame = {t=0, l=0, b=4},
+                    text = 'Are you sure you want to cancel the interrogation loop on ' .. suspect.first_name .. '?\n\n' ..
+                           'Reason: Manual cancellation requested.\n' ..
+                           'Current Status: ' .. watch.status:upper() .. '\n' ..
+                           'Attempts so far: ' .. (watch.retries or 0) .. '/' .. watch.max_retries .. '\n\n' ..
+                           'The Captain of the Guard will stop re-dispatching to this suspect.',
+                    text_pen = COLOR_YELLOW,
+                },
+                accept_hotkey_label_attrs = {
+                    label = 'Yes, cancel',
+                    frame = {b=0, l=0},
+                },
+                on_accept = function()
                     watch.status = 'cancelled'
                     cihq_announce("CI-HQ: Interrogation of " .. suspect.first_name .. " cancelled.", COLOR_YELLOW, true)
                     persist_state()
                     self:refreshCurrentDossier()
-                end
-            )
+                end,
+                on_cancel = function() end,
+                subviews = {
+                    widgets.HotkeyLabel{
+                        frame = {b=0, r=0},
+                        label = 'No, abort',
+                        key = 'LEAVESCREEN',
+                        auto_width = true,
+                        on_activate = function() dialog:dismiss() end,
+                    }
+                }
+            }
+            dialog:show()
             return
         end
     end
@@ -4664,9 +5227,20 @@ function CIHQNotifyOverlay:render(dc)
     end
 end
 
+NoArmokToggleOverlay = defclass(NoArmokToggleOverlay, overlay.OverlayWidget)
+NoArmokToggleOverlay.ATTRS = {
+    desc = 'Enables Fog-of-War (No Armok) mode for CI-HQ. Hides intrigue networks until a confession is extracted via interrogation.',
+    default_enabled = false,
+    viewscreens = 'NONE', -- Doesn't render, just a toggle state for gui/control-panel
+}
+
+function NoArmokToggleOverlay:init() end
+function NoArmokToggleOverlay:render(dc) end
+
 OVERLAY_WIDGETS = {
-    hq_button=JusticeHQOverlay,
-    notifications=CIHQNotifyOverlay,
+    hq_button = JusticeHQOverlay,
+    notifications = CIHQNotifyOverlay,
+    no_armok = NoArmokToggleOverlay,
 }
 
 --
@@ -4757,17 +5331,124 @@ function ci_alert_monitor_tick()
         ::skip_mon::
     end
     
-    -- Scan for new theft/treason crimes (artifact theft alerts)
+    -- Scan for new theft/treason crimes (artifact theft alerts) + Emergency Chain Intercept
     for _, crime in ipairs(df.global.world.crimes.all) do
         if not GLOBAL_ALERTED_CRIMES[crime.id] then
-            if crime.mode == 3 or crime.mode == 17 then -- Theft or Treason/Artifact Theft
+            -- Catch ALL theft/espionage/treason-related crimes
+            -- Enum names: Theft(8), AttemptedTheft(15), Treason(16), Espionage(17), Robbery(9)
+            -- Also keep old magic numbers (3, 17) as fallback in case enum values differ at runtime
+            local m = crime.mode
+            local is_theft = (m == df.crime_type.Theft
+                           or m == df.crime_type.AttemptedTheft
+                           or m == df.crime_type.Treason
+                           or m == df.crime_type.Espionage
+                           or m == df.crime_type.Robbery
+                           or m == 3 or m == 17)  -- legacy fallback
+            
+            if is_theft then
+                GLOBAL_ALERTED_CRIMES[crime.id] = true
+                CRIME_CACHE = nil -- Invalidate cache so new crime data appears
+                
                 if not is_initial_scan then
                     local crime_name = getCrimeName(crime.mode)
-                    cihq_announce(
-                        "CI-HQ ALERT: " .. crime_name .. " detected! Check Cases tab for details.", COLOR_LIGHTRED, true)
-                    CRIME_CACHE = nil -- Invalidate cache so new crime data appears
+                    
+                    -- Try to find the accused unit on the map
+                    local accused_unit = nil
+                    if crime.accused >= 0 then
+                        accused_unit = df.unit.find(crime.accused)
+                    end
+                    -- Fallback: try criminal field
+                    if not accused_unit and crime.criminal >= 0 then
+                        accused_unit = df.unit.find(crime.criminal)
+                    end
+                    
+                    -- If the thief is alive and on the map, offer emergency detainment
+                    if accused_unit and dfhack.units.isActive(accused_unit) and not dfhack.units.isDead(accused_unit) then
+                        local thief_name = dfhack.units.getReadableName(accused_unit)
+                        
+                        -- Get stolen item name if available
+                        local item_desc = ""
+                        if crime.item_id >= 0 then
+                            pcall(function()
+                                local item = df.item.find(crime.item_id)
+                                if item then
+                                    item_desc = "\nStolen item: " .. dfhack.items.getDescription(item, 0, true)
+                                end
+                            end)
+                        end
+                        
+                        -- Pause & center
+                        df.global.pause_state = true
+                        dfhack.gui.recenterCamera(accused_unit.pos)
+                        
+                        -- Emergency announcement
+                        pcall(function()
+                            dfhack.gui.makeAnnouncement(
+                                df.announcement_type.MEGABEAST_ARRIVAL,
+                                {D_DISPLAY=true}, accused_unit.pos,
+                                "JUSTICE HQ: " .. crime_name .. " in progress! " .. thief_name .. " caught!",
+                                COLOR_LIGHTRED, true)
+                        end)
+                        
+                        -- Show Yes/No popup for emergency chain
+                        local dialogs = require('gui.dialogs')
+                        local prompt_text = 'CI-HQ EMERGENCY: ' .. thief_name .. ' was caught committing ' .. crime_name .. '!' ..
+                            item_desc ..
+                            '\n\nDo you authorize emergency detainment?' ..
+                            '\nThe suspect will be chained in the dungeon and any stolen items will be confiscated.'
+                        
+                        -- Capture crime reference for the callback
+                        local crime_ref = crime
+                        local unit_ref = accused_unit
+                        
+                        local dialog
+                        dialog = dialogs.DialogScreen{
+                            title = 'CI-HQ: Emergency Detainment',
+                            message_label_attrs = {
+                                frame = {t=0, l=0, b=4},
+                                text = prompt_text,
+                                text_pen = COLOR_LIGHTRED,
+                            },
+                            accept_hotkey_label_attrs = {
+                                label = 'Yes, chain them',
+                                frame = {b=0, l=0},
+                            },
+                            on_accept = function()
+                                -- YES: Chain & Confiscate
+                                local ok, err = detainUnit(unit_ref)
+                                if ok then
+                                    -- Confiscate stolen item
+                                    local taken = confiscateStolenItem(unit_ref, crime_ref)
+                                    local msg = "CI-HQ: " .. thief_name .. " has been chained in the dungeon!"
+                                    if #taken > 0 then
+                                        msg = msg .. " Confiscated: " .. table.concat(taken, ", ")
+                                    end
+                                    cihq_announce(msg, COLOR_LIGHTMAGENTA, true)
+                                else
+                                    cihq_announce("CI-HQ: Emergency detainment FAILED for " .. thief_name .. ". " .. tostring(err), COLOR_RED, true)
+                                end
+                            end,
+                            on_cancel = function() end,
+                            subviews = {
+                                widgets.HotkeyLabel{
+                                    frame = {b=0, r=0},
+                                    label = 'No, let them be',
+                                    key = 'LEAVESCREEN',
+                                    auto_width = true,
+                                    on_activate = function()
+                                        dialog:dismiss()
+                                        cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " — handle manually via CI-HQ.", COLOR_YELLOW, true)
+                                    end,
+                                }
+                            }
+                        }
+                        dialog:show()
+                    else
+                        -- Thief not found on map (already fled or dead) — just announce
+                        cihq_announce(
+                            "CI-HQ ALERT: " .. crime_name .. " detected! Suspect not found on map. Check Cases tab.", COLOR_LIGHTRED, true)
+                    end
                 end
-                GLOBAL_ALERTED_CRIMES[crime.id] = true
             end
         end
     end
