@@ -5231,7 +5231,7 @@ NoArmokToggleOverlay = defclass(NoArmokToggleOverlay, overlay.OverlayWidget)
 NoArmokToggleOverlay.ATTRS = {
     desc = 'Enables Fog-of-War (No Armok) mode for CI-HQ. Hides intrigue networks until a confession is extracted via interrogation.',
     default_enabled = false,
-    viewscreens = 'NONE', -- Doesn't render, just a toggle state for gui/control-panel
+    viewscreens = 'dwarfmode', -- Safe fallback viewscreen to prevent C++ overlay crashes
 }
 
 function NoArmokToggleOverlay:init() end
@@ -5241,7 +5241,7 @@ RealisticArrestsToggleOverlay = defclass(RealisticArrestsToggleOverlay, overlay.
 RealisticArrestsToggleOverlay.ATTRS = {
     desc = 'Requires thieves to be physically seen by a military guard (Line-of-Sight) before the Emergency Detainment popup appears.',
     default_enabled = false,
-    viewscreens = 'NONE',
+    viewscreens = 'dwarfmode',
 }
 
 function RealisticArrestsToggleOverlay:init() end
@@ -5251,7 +5251,7 @@ VillainEntryAlertsToggleOverlay = defclass(VillainEntryAlertsToggleOverlay, over
 VillainEntryAlertsToggleOverlay.ATTRS = {
     desc = 'Enables the CI-HQ popup alert whenever a known villain or criminal enters the fortress map.',
     default_enabled = true,
-    viewscreens = 'NONE',
+    viewscreens = 'dwarfmode',
 }
 
 function VillainEntryAlertsToggleOverlay:init() end
