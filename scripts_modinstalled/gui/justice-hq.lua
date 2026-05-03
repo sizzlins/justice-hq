@@ -5171,7 +5171,7 @@ GLOBAL_ALERTED_UNITS = GLOBAL_ALERTED_UNITS or {}
 GLOBAL_ALERTED_CRIMES = GLOBAL_ALERTED_CRIMES or {}
 
 JusticeHQOverlay = defclass(JusticeHQOverlay, overlay.OverlayWidget)
-JusticeHQOverlay.ATTRS{
+JusticeHQOverlay.ATTRS = {
     desc='Adds a button to launch Counter-Intelligence HQ from the Justice tab.',
     default_pos={x=58, y=5},
     default_enabled=true,
@@ -5182,6 +5182,7 @@ JusticeHQOverlay.ATTRS{
 }
 
 function JusticeHQOverlay:init()
+    JusticeHQOverlay.super.init(self)
     self:addviews{
         widgets.HotkeyLabel{
             frame={t=0, l=0},
@@ -5265,7 +5266,10 @@ NoArmokToggleOverlay.ATTRS = {
     viewscreens = 'dwarfmode', -- Safe fallback viewscreen to prevent C++ overlay crashes
 }
 
-function NoArmokToggleOverlay:init() self.frame = {w=0,h=0} end
+function NoArmokToggleOverlay:init()
+    NoArmokToggleOverlay.super.init(self)
+    self.frame = {w=0,h=0}
+end
 function NoArmokToggleOverlay:render(dc) end
 
 RealisticArrestsToggleOverlay = defclass(RealisticArrestsToggleOverlay, overlay.OverlayWidget)
@@ -5276,7 +5280,10 @@ RealisticArrestsToggleOverlay.ATTRS = {
     viewscreens = 'dwarfmode',
 }
 
-function RealisticArrestsToggleOverlay:init() self.frame = {w=0,h=0} end
+function RealisticArrestsToggleOverlay:init()
+    RealisticArrestsToggleOverlay.super.init(self)
+    self.frame = {w=0,h=0}
+end
 function RealisticArrestsToggleOverlay:render(dc) end
 
 VillainEntryAlertsToggleOverlay = defclass(VillainEntryAlertsToggleOverlay, overlay.OverlayWidget)
@@ -5287,7 +5294,10 @@ VillainEntryAlertsToggleOverlay.ATTRS = {
     viewscreens = 'dwarfmode',
 }
 
-function VillainEntryAlertsToggleOverlay:init() self.frame = {w=0,h=0} end
+function VillainEntryAlertsToggleOverlay:init()
+    VillainEntryAlertsToggleOverlay.super.init(self)
+    self.frame = {w=0,h=0}
+end
 function VillainEntryAlertsToggleOverlay:render(dc) end
 
 OVERLAY_WIDGETS = {
