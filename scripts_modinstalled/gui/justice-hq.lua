@@ -5475,6 +5475,9 @@ function ci_alert_monitor_tick()
     
     local is_initial_scan = not GLOBAL_INITIAL_SCAN_DONE
     
+    -- Pre-build the crime cache once per cycle to prevent O(N^2) freezing
+    initCrimeCache()
+    
     for _, unit in ipairs(df.global.world.units.active) do
         if dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then goto skip_mon end
         if GLOBAL_ALERTED_UNITS[unit.id] then goto skip_mon end
@@ -5497,7 +5500,6 @@ function ci_alert_monitor_tick()
                     if intrigue_data.is_villain then is_suspect = true end
                 end
                 
-                initCrimeCache()
                 local open_crimes = getOpenCrimes(hfid)
                 
                 if #open_crimes > 0 then
