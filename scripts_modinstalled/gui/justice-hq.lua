@@ -3097,7 +3097,8 @@ function JusticeHQ:buildNetworkChoices()
         if #header < 80 then header = header .. string.char(196):rep(80 - #header) end
         table.insert(list_choices, {
             text = {{text = header, pen = COLOR_LIGHTBLUE}},
-            data = nil,
+            data = network.mastermind,
+            tooltip_info = {type = 'mastermind', name = network.mastermind.first_name}
         })
         
         -- Show plots
