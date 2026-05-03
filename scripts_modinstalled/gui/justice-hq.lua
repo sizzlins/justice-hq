@@ -681,7 +681,7 @@ end
 -- Helper: Get Intrigue Data from Historical Figure
 -- Reads the ACTUAL Fort Mode espionage structures from hf.info.relationships.intrigues
 -- ===========================
-function getHfIntrigueData(hf)
+function getHfIntrigueData(hf, opt_no_armok_active)
     local data = {
         has_intrigues = false,
         plot_count = 0,
@@ -698,9 +698,13 @@ function getHfIntrigueData(hf)
     data.has_intrigues = true
     
     local no_armok_active = false
-    pcall(function()
-        no_armok_active = require('plugins.overlay').isOverlayEnabled('gui/justice-hq.no_armok')
-    end)
+    if opt_no_armok_active ~= nil then
+        no_armok_active = opt_no_armok_active
+    else
+        pcall(function()
+            no_armok_active = require('plugins.overlay').isOverlayEnabled('gui/justice-hq.no_armok')
+        end)
+    end
     
     if no_armok_active and not hasConfessedToIntrigue(hf.id) then
         data.no_armok_locked = true
@@ -3787,6 +3791,10 @@ end
 function JusticeHQ:gatherSuspects()
     initCrimeCache() -- Rebuild cache to avoid O(N*M) lag
     local suspects = {}
+    
+    local no_armok_active = false
+    pcall(function() no_armok_active = require('plugins.overlay').isOverlayEnabled('gui/justice-hq.no_armok') end)
+    
     for _, unit in ipairs(df.global.world.units.active) do
         if dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then goto skip_unit end
         
@@ -3801,7 +3809,7 @@ function JusticeHQ:gatherSuspects()
             
             -- Check intrigue perspective (Fort Mode espionage data)
             if hf then
-                intrigue_data = getHfIntrigueData(hf)
+                intrigue_data = getHfIntrigueData(hf, no_armok_active)
                 if intrigue_data.is_villain then
                     is_suspect = true
                 end
@@ -5475,6 +5483,11 @@ function ci_alert_monitor_tick()
     
     local is_initial_scan = not GLOBAL_INITIAL_SCAN_DONE
     
+    -- Cache configuration states once per tick to prevent redundant pcall/string parsing in the hot loop
+    local no_armok_active = false
+    pcall(function() no_armok_active = require('plugins.overlay').isOverlayEnabled('gui/justice-hq.no_armok') end)
+    local villain_alerts_active = isVillainEntryAlertsEnabled()
+    
     -- Pre-build the crime cache once per cycle to prevent O(N^2) freezing
     initCrimeCache()
     
@@ -5496,14 +5509,14 @@ function ci_alert_monitor_tick()
             if hfid ~= -1 then
                 local hf = df.historical_figure.find(hfid)
                 if hf then
-                    local intrigue_data = getHfIntrigueData(hf)
+                    local intrigue_data = getHfIntrigueData(hf, no_armok_active)
                     if intrigue_data.is_villain then is_suspect = true end
                 end
                 
                 local open_crimes = getOpenCrimes(hfid)
                 
                 if #open_crimes > 0 then
-                    if not is_initial_scan and isVillainEntryAlertsEnabled() then
+                    if not is_initial_scan and villain_alerts_active then
                         local name = dfhack.units.getReadableName(unit)
                         local crime_names = {}
                         for _, c in ipairs(open_crimes) do
