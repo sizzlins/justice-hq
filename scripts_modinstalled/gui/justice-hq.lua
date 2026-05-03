@@ -4126,7 +4126,7 @@ function JusticeHQ:serializeCurrentTab()
         tab_name = list_map[page].name
         local list = self.subviews[list_map[page].view]
         if list then
-            for _, choice in ipairs(list:getVisibleChoices()) do
+            for _, choice in ipairs(list:getChoices()) do
                 if choice.text then
                     local line = self:serializeChoiceToLine(choice.text)
                     if line ~= '' then
