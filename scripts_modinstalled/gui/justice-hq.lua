@@ -3824,14 +3824,28 @@ function JusticeHQ:gatherSuspects()
                     if intrigue_data.plot_count > 0 then
                         -- Check if any plots are active (not on hold)
                         local active_plots = 0
+                        local hostile_plots = 0
                         for _, p in ipairs(intrigue_data.plots) do
-                            if not p.on_hold then active_plots = active_plots + 1 end
+                            if not p.on_hold then 
+                                active_plots = active_plots + 1 
+                                if p.type_name ~= 'Counterintelligence' then
+                                    hostile_plots = hostile_plots + 1
+                                end
+                            end
                         end
-                        if active_plots > 0 then
+                        
+                        if hostile_plots > 0 then
                             threat = "High"
                             reason_lines = {
-                                "Running " .. active_plots .. " active intrigue plot(s) against the fortress.",
+                                "Running " .. hostile_plots .. " active hostile intrigue plot(s) against the fortress.",
                                 "Immediate threat to fortress security."
+                            }
+                            next_plot = "Active"
+                        elseif active_plots > 0 then
+                            threat = "Low"
+                            reason_lines = {
+                                "Conducting " .. active_plots .. " active defensive plot(s) (Counterintelligence).",
+                                "Not considered a threat to the fortress."
                             }
                             next_plot = "Active"
                         else
