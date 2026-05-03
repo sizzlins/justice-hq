@@ -51,7 +51,7 @@ local CIHQ_MAX_NOTIFICATIONS = 6
 local CIHQ_NOTIFICATION_LIFETIME_MS = 6000  -- 6 seconds real-time
 
 -- Wrapper: pushes to the colored overlay queue AND fires the native announcement
-local function cihq_announce(text, color, show_popup)
+local function cihq_announce(text, color, show_popup, ui_only)
     table.insert(CIHQ_NOTIFICATIONS, 1, {
         text = text,
         color = color or COLOR_GREY,
@@ -60,6 +60,8 @@ local function cihq_announce(text, color, show_popup)
     while #CIHQ_NOTIFICATIONS > CIHQ_MAX_NOTIFICATIONS do
         table.remove(CIHQ_NOTIFICATIONS)
     end
+    
+    if ui_only then return end
     
     -- The v50 vanilla UI ignores LIGHT colors (8-15) for generic announcements,
     -- defaulting them to dark gray/black. We must map them to base colors (0-7).
@@ -3385,7 +3387,7 @@ end
 
 function JusticeHQ:onSubmitNetwork(idx, choice)
     if not choice or not choice.data then
-        cihq_announce("CI-HQ: Select a specific person, not a header or plot row.", COLOR_YELLOW)
+        cihq_announce("CI-HQ: Select a specific person, not a header or plot row.", COLOR_YELLOW, false, true)
         return
     end
     self.selected_suspect = choice.data
@@ -4244,7 +4246,7 @@ end
 
 function JusticeHQ:onDetain()
     if not self.selected_suspect then
-        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, true)
+        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, false, true)
         return
     end
     
@@ -4582,7 +4584,7 @@ end
 
 function JusticeHQ:onPardon()
     if not self.selected_suspect then
-        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, true)
+        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, false, true)
         return
     end
     
@@ -4649,7 +4651,7 @@ end
 
 function JusticeHQ:onExecute()
     if not self.selected_suspect then
-        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, true)
+        cihq_announce("CI-HQ: Select a suspect first.", COLOR_YELLOW, false, true)
         return
     end
     local unit = self.selected_suspect.unit
@@ -4748,7 +4750,7 @@ function JusticeHQ:onInterrogate()
         end
     end
     if not suspect then
-        cihq_announce("CI-HQ: No suspect selected.", COLOR_YELLOW, true)
+        cihq_announce("CI-HQ: No suspect selected.", COLOR_YELLOW, false, true)
         return
     end
     
@@ -4815,13 +4817,13 @@ function JusticeHQ:onInterrogate()
     local guard = findCaptainOfGuard()
     if not guard then
         cihq_announce(
-            "CI-HQ: No Captain of the Guard or Sheriff is assigned! Open the Nobles screen (n) and appoint one.", COLOR_LIGHTRED, true)
+            "CI-HQ: No Captain of the Guard or Sheriff is assigned! Open the Nobles screen (n) and appoint one.", COLOR_LIGHTRED, false, true)
         return
     end
     
     -- Prevent interrogating the Captain themselves
     if guard.id == uid then
-        cihq_announce("CI-HQ: The Captain of the Guard cannot interrogate themselves!", COLOR_LIGHTRED, true)
+        cihq_announce("CI-HQ: The Captain of the Guard cannot interrogate themselves!", COLOR_LIGHTRED, false, true)
         return
     end
     
@@ -4861,8 +4863,8 @@ function JusticeHQ:onInterrogate()
         watch.dispatched_tick = df.global.cur_year_tick
         cihq_announce("CI-HQ: Captain dispatched to interrogate " .. suspect.first_name .. "!", COLOR_LIGHTGREEN, true)
     else
-        cihq_announce("CI-HQ: Could not auto-dispatch (" .. tostring(err) .. ")", COLOR_YELLOW)
-        cihq_announce("CI-HQ: Use Justice tab to manually order interrogation.", COLOR_CYAN, true)
+        cihq_announce("CI-HQ: Could not auto-dispatch (" .. tostring(err) .. ")", COLOR_YELLOW, false, true)
+        cihq_announce("CI-HQ: Use Justice tab to manually order interrogation.", COLOR_CYAN, false, true)
     end
     
     startInterrogationMonitor()
