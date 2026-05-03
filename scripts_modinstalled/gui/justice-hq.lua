@@ -5177,7 +5177,7 @@ JusticeHQOverlay.ATTRS = {
     default_enabled=true,
     viewscreens='dwarfmode/Info/JUSTICE',
     frame={w=22, h=3},
-    frame_style=gui.FRAME_MEDIUM,
+    frame_style=gui.GREY_LINE_FRAME,
     frame_background=gui.CLEAR_PEN,
 }
 
