@@ -5197,13 +5197,18 @@ end
 -- CIHQNotifyOverlay: vivid colored notification toasts
 --
 CIHQNotifyOverlay = defclass(CIHQNotifyOverlay, overlay.OverlayWidget)
-CIHQNotifyOverlay.ATTRS{
+CIHQNotifyOverlay.ATTRS = {
     desc='Shows CI-HQ action notifications with vivid colors on the game screen.',
     default_pos={x=1, y=1},
     default_enabled=false,
     fullscreen=true,
     viewscreens='dwarfmode/Default',
 }
+
+function CIHQNotifyOverlay:init()
+    CIHQNotifyOverlay.super.init(self)
+    self.frame = {w=0, h=0}
+end
 
 function CIHQNotifyOverlay:preUpdateLayout(parent_rect)
     self.frame.w = parent_rect.width
