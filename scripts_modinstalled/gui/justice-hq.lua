@@ -30,6 +30,9 @@ local utils = require('utils')
 -- Key = unit.id, Value = {name, retries, max_retries, status, unit_id, hf_id}
 interrogation_watchlist = interrogation_watchlist or {}
 
+-- Key = unit.id, Value = {name, timestamp}
+execution_watchlist = execution_watchlist or {}
+
 -- Persistent UI state (survives close/reopen within same session)
 PERSISTENT_UI = PERSISTENT_UI or {
     filter_level = 1,
@@ -79,7 +82,7 @@ local function cihq_announce(text, color, show_popup, ui_only)
 end
 
 local MAX_RETRIES = 15
-local MAX_CONSECUTIVE_DUDS = 3  -- stop after this many failed attempts in a row
+local MAX_CONSECUTIVE_DUDS = 15  -- stop after this many failed attempts in a row
 local GLOBAL_KEY = 'gui/justice-hq'
 
 enabled = enabled or false
@@ -103,9 +106,19 @@ local function persist_state()
             hf_id = watch.hf_id,
         }
     end
+    
+    local exec_data = {}
+    for uid, data in pairs(execution_watchlist) do
+        exec_data[tostring(uid)] = {
+            name = data.name,
+            timestamp = data.timestamp
+        }
+    end
+    
     dfhack.persistent.saveSiteData(GLOBAL_KEY, {
         enabled = enabled,
         watchlist = watchlist_data,
+        exec_watchlist = exec_data,
     })
 end
 
@@ -138,6 +151,15 @@ local function load_state()
                 watch.dispatched_tick = nil
                 watch.seen_interrogating = nil
                 interrogation_watchlist[uid] = watch
+            end
+        end
+    end
+    if persisted_data.exec_watchlist then
+        execution_watchlist = {}
+        for uid_str, data in pairs(persisted_data.exec_watchlist) do
+            local uid = tonumber(uid_str)
+            if uid then
+                execution_watchlist[uid] = data
             end
         end
     end
@@ -1272,9 +1294,28 @@ function JusticeHQ:init()
                             key = 'CUSTOM_K',
                             label = 'Execute',
                             text_pen = COLOR_RED,
-                            visible = true,
+                            visible = function()
+                                if self.selected_suspect and self.selected_suspect.unit then
+                                    return execution_watchlist[self.selected_suspect.unit.id] == nil
+                                end
+                                return true
+                            end,
                             on_activate = self:callback('onExecute'),
                         },
+                        widgets.HotkeyLabel{
+                            frame = {l = 28, t = 1, w = 12},
+                            key = 'CUSTOM_K',
+                            label = 'Cancel',
+                            text_pen = COLOR_YELLOW,
+                            visible = function()
+                                if self.selected_suspect and self.selected_suspect.unit then
+                                    return execution_watchlist[self.selected_suspect.unit.id] ~= nil
+                                end
+                                return false
+                            end,
+                            on_activate = self:callback('onCancelExecute'),
+                        },
+
                         widgets.HotkeyLabel{
                             frame = {l = 41, t = 1, w = 11},
                             key = 'CUSTOM_D',
@@ -3426,6 +3467,45 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
         table.insert(lines, NEWLINE)
     end
 
+    -- Check for pending sentences
+    local pending_sentences = {}
+    for _, p in ipairs(df.global.plotinfo.punishments) do
+        if p.criminal == s.unit.id then
+            table.insert(pending_sentences, p)
+        end
+    end
+    
+    if #pending_sentences > 0 then
+        table.insert(lines, NEWLINE)
+        table.insert(lines, {text = string.char(196):rep(40), pen = COLOR_DARKGREY})
+        table.insert(lines, NEWLINE)
+        table.insert(lines, {text = "PENDING SENTENCES:", pen = COLOR_LIGHTRED})
+        table.insert(lines, NEWLINE)
+        
+        local total_beatings = 0
+        local total_strikes = 0
+        local total_prison = 0
+        
+        for _, p in ipairs(pending_sentences) do
+            if p.beating > 0 then total_beatings = total_beatings + 1 end
+            if p.hammer_strikes > 0 then total_strikes = total_strikes + p.hammer_strikes end
+            if p.prison_counter > 0 then total_prison = total_prison + math.ceil(p.prison_counter / 3360) end
+        end
+        
+        if total_beatings > 0 then
+            table.insert(lines, {text = "  " .. string.char(16) .. " " .. total_beatings .. " scheduled beating(s)", pen = COLOR_LIGHTRED})
+            table.insert(lines, NEWLINE)
+        end
+        if total_strikes > 0 then
+            table.insert(lines, {text = "  " .. string.char(16) .. " " .. total_strikes .. " hammer strike(s)", pen = COLOR_RED})
+            table.insert(lines, NEWLINE)
+        end
+        if total_prison > 0 then
+            table.insert(lines, {text = "  " .. string.char(16) .. " " .. total_prison .. " months jail time", pen = COLOR_YELLOW})
+            table.insert(lines, NEWLINE)
+        end
+    end
+
     -- Threat score
     table.insert(lines, NEWLINE)
     local threat_color = COLOR_DARKGREY
@@ -4570,6 +4650,13 @@ function JusticeHQ:onConvict()
                 
                 cihq_announce("CI-HQ: " .. suspect.first_name .. " was convicted of " .. convicted_count .. " crime(s)! Justice will be served.", COLOR_LIGHTGREEN, true)
                 
+                local watch = interrogation_watchlist[unit.id]
+                if watch and (watch.status == 'active' or watch.status == 'dispatched') then
+                    watch.status = 'concluded'
+                    cihq_announce("CI-HQ: Interrogation loop for " .. watch.name .. " concluded due to conviction.", COLOR_GREEN, true)
+                    persist_state()
+                end
+                
                 initCrimeCache()
                 self_ref:refreshCurrentDossier()
                 if self_ref.subviews.suspect_list then
@@ -4669,20 +4756,20 @@ function JusticeHQ:onExecute()
         return
     end
     
-    if dfhack.units.isCitizen(unit) then
-        -- Citizens go through the vanilla punishment queue
-        local executor_name = "Hammerer"
-        local hammer_strikes = 50
-        local beatings = 0
-        
-        if not findHammerer() then
-            hammer_strikes = 0
-            beatings = 100
-            executor_name = "Captain of the Guard"
-        end
-        
+    local executor_name = "Hammerer"
+    local hammer_strikes = 50
+    local beatings = 0
+    
+    if not findHammerer() then
+        hammer_strikes = 0
+        beatings = 100
+        executor_name = "Captain of the Guard"
+    end
+    
+    local self_ref = self
+    local function do_execute(target_unit)
         local p = df.punishment:new()
-        p.criminal = unit.id
+        p.criminal = target_unit.id
         p.officer = -1
         p.beating = beatings
         p.hammer_strikes = hammer_strikes
@@ -4691,25 +4778,37 @@ function JusticeHQ:onExecute()
         p.chain = -1
         df.global.plotinfo.punishments:insert('#', p)
         
-        cihq_announce("CI-HQ: EXECUTION ORDERED for " .. dfhack.units.getReadableName(unit) .. ". " .. executor_name .. " dispatched.", COLOR_RED, true)
+        -- Add to execution watchlist for fallback monitoring
+        execution_watchlist[target_unit.id] = {
+            name = dfhack.units.getReadableName(target_unit),
+            timestamp = df.global.cur_year_tick
+        }
+        persist_state()
+        
+        cihq_announce("CI-HQ: EXECUTION ORDERED for " .. dfhack.units.getReadableName(target_unit) .. ". " .. executor_name .. " dispatched.", COLOR_RED, true)
+        self_ref:refreshCurrentDossier()
+    end
+    
+    if dfhack.units.isCitizen(unit) then
+        -- Citizens go through the vanilla punishment queue natively
+        do_execute(unit)
     else
-        -- Non-citizens: the vanilla punishment queue ignores foreign visitors entirely.
-        -- Show a confirmation dialog explaining why and requesting player approval.
+        -- Non-citizens: the vanilla punishment queue often ignores foreign visitors.
         local name = dfhack.units.getReadableName(unit)
         local unit_id = unit.id
-        local self_ref = self
         local dialog
         dialog = dialogs.DialogScreen{
-            title = 'CI-HQ: Extrajudicial Execution',
+            title = 'CI-HQ: Foreign Execution',
             message_label_attrs = {
                 frame = {t=0, l=0, b=4},
                 text = 'Target: ' .. name .. '\n\n' ..
                        'This suspect is a non-citizen visitor. The dwarven justice\n' ..
-                       'system cannot sentence foreign nationals - any punishment\n' ..
-                       'order will be ignored by the Hammerer.\n\n' ..
-                       'CI-HQ can bypass the justice system and execute this\n' ..
-                       'suspect directly. This action cannot be undone.\n\n' ..
-                       'Authorize extrajudicial execution?',
+                       'system often rejects punishment orders for foreign nationals.\n\n' ..
+                       'CI-HQ will attempt to assign the execution to the ' .. executor_name .. '.\n' ..
+                       'If the justice system voids the order, or if the target\n' ..
+                       'survives for 7 days, CI-HQ will automatically trigger a\n' ..
+                       'lethal fallback mechanism (Fortress Security).\n\n' ..
+                       'Authorize execution?',
                 text_pen = COLOR_LIGHTRED,
             },
             accept_hotkey_label_attrs = {
@@ -4722,11 +4821,7 @@ function JusticeHQ:onExecute()
                     cihq_announce("CI-HQ: Target has left the map. Execution aborted.", COLOR_RED, true)
                     return
                 end
-                local exterminate = reqscript('exterminate')
-                exterminate.killUnit(target, exterminate.killMethod.INSTANT)
-                cihq_announce("CI-HQ: " .. name .. " has been executed by order of the fortress!", COLOR_LIGHTRED, true)
-                CRIME_CACHE = nil
-                self_ref:refreshCurrentDossier()
+                do_execute(target)
             end,
             on_cancel = function() end,
             subviews = {
@@ -4740,9 +4835,26 @@ function JusticeHQ:onExecute()
             }
         }
         dialog:show()
-        return -- Don't refresh yet, wait for player confirmation
     end
-    self:refreshCurrentDossier()
+end
+
+function JusticeHQ:onCancelExecute()
+    if not self.selected_suspect then return end
+    local uid = self.selected_suspect.unit.id
+    
+    if execution_watchlist[uid] then
+        -- Find pending punishment and zero it out
+        for _, punishment in ipairs(df.global.plotinfo.punishments) do
+            if punishment.criminal == uid and (punishment.hammer_strikes > 0 or punishment.beating > 0) then
+                punishment.hammer_strikes = 0
+                punishment.beating = 0
+            end
+        end
+        execution_watchlist[uid] = nil
+        persist_state()
+        cihq_announce("CI-HQ: Execution order cancelled for " .. dfhack.units.getReadableName(self.selected_suspect.unit) .. ".", COLOR_YELLOW, true)
+        self:refreshCurrentDossier()
+    end
 end
 
 function JusticeHQ:onInterrogate()
@@ -4983,15 +5095,7 @@ function dispatchGuardToSuspect(uid)
     return ok
 end
 
-local function countIntelReports(hfid)
-    local count = 0
-    for _, rep in ipairs(df.global.world.status.interrogation_reports) do
-        if rep.subject_hf == hfid then
-            count = count + 1
-        end
-    end
-    return count
-end
+-- Optimized out: replaced with O(1) global array length check
 
 function interrogationMonitorTick()
     local ok, err = pcall(function()
@@ -5031,99 +5135,97 @@ function interrogationMonitorTick()
                             end
                         end
                         
+                        -- 1. Check for new interrogation reports (catches vanilla UI interrogations too)
+                        local global_report_count = #df.global.world.status.interrogation_reports
+                        local reports_found = false
+                        local is_dud = true
+                        local latest_report = nil
+                        local latest_outcome = nil
+                        
+                        if global_report_count > (watch.last_global_report_count or 0) then
+                            reports_found = true
+                            for i = #df.global.world.status.interrogation_reports - 1, 0, -1 do
+                                local r = df.global.world.status.interrogation_reports[i]
+                                if r.subject_hf == unit.hist_figure_id then
+                                    latest_report = r
+                                    break
+                                end
+                            end
+                            
+                            if latest_report then
+                                latest_outcome = computeIntelOutcome(latest_report)
+                                if latest_outcome == 'CONFESSED' or latest_outcome == 'NEW INTEL' then
+                                    is_dud = false
+                                end
+                            end
+                            watch.last_global_report_count = global_report_count
+                        end
+
+                        if reports_found then
+                            watch.retries = (watch.retries or 0) + 1
+                            if not is_dud then
+                                watch.consecutive_duds = 0
+                                if latest_outcome == 'CONFESSED' then
+                                    watch.status = 'confessed'
+                                    cihq_announce("CI-HQ: " .. watch.name .. " confessed under interrogation! All crimes revealed. Case closed.", COLOR_LIGHTGREEN, true)
+                                    CRIME_CACHE = nil
+                                    INTERROGATION_HISTORY_CACHE = nil
+                                    persist_state()
+                                elseif watch.retries >= watch.max_retries then
+                                    watch.status = 'concluded'
+                                    cihq_announce("CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
+                                    persist_state()
+                                else
+                                    watch.status = 'active'
+                                    watch.dispatched_tick = nil
+                                    cihq_announce("CI-HQ: " .. watch.name .. " revealed new intel! Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_LIGHTGREEN, true)
+                                    persist_state()
+                                end
+                            else
+                                watch.consecutive_duds = (watch.consecutive_duds or 0) + 1
+                                local dud_msg = latest_outcome == 'REFUSED' and "refused to cooperate" or "revealed no new intel"
+                                
+                                if watch.consecutive_duds >= MAX_CONSECUTIVE_DUDS then
+                                    watch.status = 'concluded'
+                                    cihq_announce("CI-HQ: " .. watch.name .. " " .. dud_msg .. " after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.", COLOR_YELLOW, true)
+                                    persist_state()
+                                elseif watch.retries >= watch.max_retries then
+                                    watch.status = 'concluded'
+                                    cihq_announce("CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
+                                    persist_state()
+                                else
+                                    watch.status = 'active'
+                                    watch.dispatched_tick = nil
+                                    cihq_announce("CI-HQ: " .. watch.name .. " " .. dud_msg .. " (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_CYAN, true)
+                                    persist_state()
+                                end
+                            end
+                        end
+
+                        -- 2. Prune stale watchlist entries (e.g. convicted via Vanilla UI)
+                        if (watch.status == 'active' or watch.status == 'dispatched') and not isSuspectStillThreat(uid) then
+                            watch.status = 'concluded'
+                            cihq_announce("CI-HQ: " .. watch.name .. " is no longer a threat. Interrogation concluded.", COLOR_GREEN, true)
+                            persist_state()
+                        end
+
+                        -- 3. Handle dispatching
                         if watch.status == 'active' then
                             if not guard_is_busy_justice then
-                                -- Snapshot the current report count before dispatching
-                                watch.last_report_count = countIntelReports(unit.hist_figure_id)
-                                
+                                watch.last_global_report_count = #df.global.world.status.interrogation_reports
                                 if dispatchGuardToSuspect(uid) then
                                     watch.status = 'dispatched'
                                     watch.dispatched_tick = df.global.cur_year_tick
-                                    cihq_announce(
-                                        "CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".", COLOR_LIGHTGREEN, true)
+                                    cihq_announce("CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".", COLOR_LIGHTGREEN, true)
                                 end
                             end
                         elseif watch.status == 'dispatched' then
-                            -- Check if the job finished
                             local elapsed = df.global.cur_year_tick - (watch.dispatched_tick or 0)
-                            -- Handle year rollover: if dispatched_tick > cur_year_tick, year wrapped
                             if elapsed < 0 then elapsed = 999 end
-                            
-                            -- Wait for guard to finish or grace period to expire
                             if not guard_is_busy_justice and elapsed >= 100 then
-                                -- Guard is idle and enough time passed for the job to have completed.
-                                -- Check if new interrogation reports appeared.
-                                local new_count = countIntelReports(unit.hist_figure_id)
-                                local reports_found = false
-                                local is_dud = true
-                                
-                                if new_count > (watch.last_report_count or 0) then
-                                    reports_found = true
-                                    -- Find the newest report for this target
-                                    local latest_report = nil
-                                    local latest_outcome = nil
-                                    for i = #df.global.world.status.interrogation_reports - 1, 0, -1 do
-                                        local r = df.global.world.status.interrogation_reports[i]
-                                        if r.subject_hf == unit.hist_figure_id then
-                                            latest_report = r
-                                            break
-                                        end
-                                    end
-                                    
-                                    if latest_report then
-                                        latest_outcome = computeIntelOutcome(latest_report)
-                                        if latest_outcome == 'CONFESSED' or latest_outcome == 'NEW INTEL' then
-                                            is_dud = false
-                                        end
-                                    end
-                                    watch.last_report_count = new_count
-                                end
-
-                                watch.retries = (watch.retries or 0) + 1
-                                
-                                if reports_found and not is_dud then
-                                    -- New intel extracted! Reset dud counter, continue.
-                                    watch.consecutive_duds = 0
-                                    if watch.retries >= watch.max_retries then
-                                        watch.status = 'concluded'
-                                        cihq_announce(
-                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
-                                        persist_state()
-                                    else
-                                        watch.status = 'active'
-                                        watch.dispatched_tick = nil
-                                        cihq_announce(
-                                            "CI-HQ: " .. watch.name .. " spilled some intel! Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_LIGHTGREEN, true)
-                                        persist_state()
-                                    end
-                                else
-                                    -- No new intel this round (suspect refused or had nothing new).
-                                    -- We allow up to MAX_CONSECUTIVE_DUDS retries because refusals are stat-based rolls.
-                                    watch.consecutive_duds = (watch.consecutive_duds or 0) + 1
-                                    
-                                    local dud_msg = "revealed no new intel"
-                                    if latest_outcome == 'REFUSED' then
-                                        dud_msg = "refused to cooperate"
-                                    end
-                                    
-                                    if watch.consecutive_duds >= MAX_CONSECUTIVE_DUDS then
-                                        watch.status = 'concluded'
-                                        cihq_announce(
-                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.", COLOR_YELLOW, true)
-                                        persist_state()
-                                    elseif watch.retries >= watch.max_retries then
-                                        watch.status = 'concluded'
-                                        cihq_announce(
-                                            "CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
-                                        persist_state()
-                                    else
-                                        watch.status = 'active'
-                                        watch.dispatched_tick = nil
-                                        cihq_announce(
-                                            "CI-HQ: " .. watch.name .. " " .. dud_msg .. " (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_CYAN, true)
-                                        persist_state()
-                                    end
-                                end
+                                -- Guard is idle, enough time passed, but NO report appeared. Job interrupted.
+                                watch.status = 'active'
+                                watch.dispatched_tick = nil
                             end
                         end
                     end
@@ -5131,7 +5233,49 @@ function interrogationMonitorTick()
             end
         end
         
-        if any_active then
+        -- Execution Monitor Logic
+        local any_exec_active = false
+        for uid, exec_data in pairs(execution_watchlist) do
+            any_exec_active = true
+            local unit = df.unit.find(uid)
+            
+            -- Condition A: Unit is dead -> Execution successful!
+            if not unit or dfhack.units.isDead(unit) then
+                execution_watchlist[uid] = nil
+                persist_state()
+            else
+                -- Condition B: Unit is still alive. Check if punishment still exists.
+                local punishment_found = false
+                for _, p in ipairs(df.global.plotinfo.punishments) do
+                    if p.criminal == uid and (p.hammer_strikes > 0 or p.beating > 0) then
+                        punishment_found = true
+                        break
+                    end
+                end
+                
+                local elapsed = df.global.cur_year_tick - exec_data.timestamp
+                if elapsed < 0 then elapsed = elapsed + 403200 end -- handle year wrap
+                
+                -- 8400 ticks = 7 days (1200 ticks per day)
+                if not punishment_found or elapsed > 8400 then
+                    -- Trigger Fallback
+                    local exterminate = reqscript('exterminate')
+                    exterminate.killUnit(unit, exterminate.killMethod.INSTANT)
+                    cihq_announce("CI-HQ: Justice system failed to execute " .. exec_data.name .. ". Fallback extrajudicial execution triggered.", COLOR_LIGHTRED, true)
+                    
+                    execution_watchlist[uid] = nil
+                    CRIME_CACHE = nil
+                    persist_state()
+                    
+                    -- Trigger a UI refresh if the dossier is open
+                    if JusticeHQ and JusticeHQ.instance then
+                        JusticeHQ.instance:refreshCurrentDossier()
+                    end
+                end
+            end
+        end
+        
+        if any_active or any_exec_active then
             monitor_last_scheduled_tick = df.global.cur_year_tick
             dfhack.timeout(MONITOR_INTERVAL, 'ticks', interrogationMonitorTick)
         else
@@ -5248,12 +5392,14 @@ function CIHQNotifyOverlay:render(dc)
             -- Draw a solid background strip for readability (black background)
             local text = notif.text
             local strip_len = math.min(#text + 2, sw - 2)
+            local bg_pen = dfhack.pen.parse{fg=COLOR_BLACK, bg=COLOR_BLACK}
             for x = 0, strip_len - 1 do
-                dc:seek(x, y):char(' ', COLOR_BLACK)
+                dc:seek(x, y):char(' ', bg_pen)
             end
 
-            -- Draw the colored text
-            dc:seek(1, y):pen(color):string(text)
+            -- Draw the colored text with explicit black background
+            local text_pen = dfhack.pen.parse{fg=color, bg=COLOR_BLACK}
+            dc:seek(1, y):pen(text_pen):string(text)
         end
     end
 end
@@ -5425,45 +5571,27 @@ local function processNewCrimes(is_initial_scan)
                         
                         local dialog
                         dialog = dialogs.DialogScreen{
-                            title = 'CI-HQ: Emergency Detainment',
+                            title = 'CI-HQ: Crime Discovered',
                             message_label_attrs = {
                                 frame = {t=0, l=0, b=4},
-                                text = 'CI-HQ EMERGENCY: ' .. thief_name .. ' was caught committing ' .. crime_name .. ' by ' .. guard_name .. '!' ..
+                                text = 'CI-HQ ALERT: ' .. thief_name .. ' was discovered committing ' .. crime_name .. ' by ' .. guard_name .. '!' ..
                                     item_desc ..
-                                    '\n\nDo you authorize emergency detainment?' ..
-                                    '\nThe suspect will be chained in the dungeon and any stolen items will be confiscated.',
+                                    '\n\nThe suspect has been logged in Justice-HQ.' ..
+                                    '\nYou may review their case and manually detain them if needed.',
                                 text_pen = COLOR_LIGHTRED,
                             },
                             accept_hotkey_label_attrs = {
-                                label = 'Yes, chain them',
+                                label = 'OK',
                                 frame = {b=0, l=0},
                             },
                             on_accept = function()
-                                local ok, err = detainUnit(unit_ref)
-                                if ok then
-                                    local taken = confiscateStolenItem(unit_ref, crime_ref)
-                                    local msg = "CI-HQ: " .. thief_name .. " has been chained in the dungeon!"
-                                    if #taken > 0 then
-                                        msg = msg .. " Confiscated: " .. table.concat(taken, ", ")
-                                    end
-                                    cihq_announce(msg, COLOR_LIGHTMAGENTA, true)
-                                else
-                                    cihq_announce("CI-HQ: Emergency detainment FAILED for " .. thief_name .. ". " .. tostring(err), COLOR_RED, true)
-                                end
+                                dialog:dismiss()
+                                cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " — handle manually via CI-HQ.", COLOR_YELLOW, true)
                             end,
-                            on_cancel = function() end,
-                            subviews = {
-                                widgets.HotkeyLabel{
-                                    frame = {b=0, r=0},
-                                    label = 'No, let them be',
-                                    key = 'LEAVESCREEN',
-                                    auto_width = true,
-                                    on_activate = function()
-                                        dialog:dismiss()
-                                        cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " — handle manually via CI-HQ.", COLOR_YELLOW, true)
-                                    end,
-                                }
-                            }
+                            on_cancel = function()
+                                dialog:dismiss()
+                                cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " — handle manually via CI-HQ.", COLOR_YELLOW, true)
+                            end,
                         }
                         dialog:show()
                         showed_popup_this_loop = true
