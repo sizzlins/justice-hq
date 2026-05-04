@@ -119,6 +119,7 @@ local function persist_state()
         enabled = enabled,
         watchlist = watchlist_data,
         exec_watchlist = exec_data,
+        ui_state = PERSISTENT_UI,
     })
 end
 
@@ -160,6 +161,19 @@ local function load_state()
             local uid = tonumber(uid_str)
             if uid then
                 execution_watchlist[uid] = data
+            end
+        end
+    end
+    if persisted_data.ui_state then
+        for k, v in pairs(persisted_data.ui_state) do
+            if type(v) == 'table' then
+                PERSISTENT_UI[k] = {}
+                for idx, val in pairs(v) do
+                    local num_idx = tonumber(idx)
+                    if num_idx then PERSISTENT_UI[k][num_idx] = val else PERSISTENT_UI[k][idx] = val end
+                end
+            else
+                PERSISTENT_UI[k] = v
             end
         end
     end
@@ -2043,21 +2057,42 @@ end
 function JusticeHQ:rebuildActiveTab()
     local page = self.subviews.pages:getSelected()
     if page == 1 then
+        local search = PERSISTENT_UI.search_text[1]
         self:setListChoices(self.subviews.suspect_list, self:buildChoices())
-        if PERSISTENT_UI.search_text[1] then self.subviews.suspect_list:setFilter(PERSISTENT_UI.search_text[1]) end
+        if search and search ~= "" then 
+            self.subviews.suspect_list:setFilter(search)
+            PERSISTENT_UI.search_text[1] = search
+        end
     elseif page == 2 then
         initCrimeCache()  -- Refresh crime cache so new crimes appear
+        local search = PERSISTENT_UI.search_text[2]
         self:setListChoices(self.subviews.cases_list, self:buildCaseChoices())
-        if PERSISTENT_UI.search_text[2] then self.subviews.cases_list:setFilter(PERSISTENT_UI.search_text[2]) end
+        if search and search ~= "" then 
+            self.subviews.cases_list:setFilter(search)
+            PERSISTENT_UI.search_text[2] = search
+        end
     elseif page == 3 then
         initCrimeCache()  -- Refresh crime cache so new warrants appear
+        local search = PERSISTENT_UI.search_text[3]
         self:setListChoices(self.subviews.warrants_list, self:buildWarrantsChoices())
-        if PERSISTENT_UI.search_text[3] then self.subviews.warrants_list:setFilter(PERSISTENT_UI.search_text[3]) end
+        if search and search ~= "" then 
+            self.subviews.warrants_list:setFilter(search)
+            PERSISTENT_UI.search_text[3] = search
+        end
     elseif page == 4 then
+        local search = PERSISTENT_UI.search_text[4]
         self:setListChoices(self.subviews.convicts_list, self:buildConvictChoices())
-        if PERSISTENT_UI.search_text[4] then self.subviews.convicts_list:setFilter(PERSISTENT_UI.search_text[4]) end
+        if search and search ~= "" then 
+            self.subviews.convicts_list:setFilter(search)
+            PERSISTENT_UI.search_text[4] = search
+        end
     elseif page == 5 then
+        local search = PERSISTENT_UI.search_text[5]
         self:setListChoices(self.subviews.network_list, self:buildNetworkChoices())
+        if search and search ~= "" then 
+            self.subviews.network_list:setFilter(search)
+            PERSISTENT_UI.search_text[5] = search
+        end
     elseif page == 6 then
         -- Case File tab: content is populated by onOpenCaseFile, not rebuilt on tab switch.
         -- If no suspect is selected, show guidance.
@@ -2076,8 +2111,12 @@ function JusticeHQ:rebuildActiveTab()
             dfhack.printerr("Error in buildIntelChoices: " .. tostring(result))
             self.subviews.intel_list:setChoices({{text = "ERROR: " .. tostring(result)}})
         else
+            local search = PERSISTENT_UI.search_text[7]
             self.subviews.intel_list:setChoices(result)
-            if PERSISTENT_UI.search_text[7] then self.subviews.intel_list:setFilter(PERSISTENT_UI.search_text[7]) end
+            if search and search ~= "" then 
+                self.subviews.intel_list:setFilter(search)
+                PERSISTENT_UI.search_text[7] = search
+            end
         end
     end
 end
