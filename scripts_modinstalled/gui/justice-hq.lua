@@ -412,15 +412,21 @@ end
 -- ===========================
 
 function findCaptainOfGuard()
-    for _, unit in ipairs(df.global.world.units.active) do
-        if dfhack.units.isCitizen(unit) and dfhack.units.isAlive(unit) then
-            local positions = dfhack.units.getNoblePositions(unit)
-            if positions then
-                for _, pos in ipairs(positions) do
-                    if pos.position and (pos.position.code == 'CAPTAIN_OF_THE_GUARD'
-                                      or pos.position.code == 'SHERIFF') then
-                        return unit
+    local entity = df.historical_entity.find(df.global.plotinfo.group_id)
+    if not entity then return nil end
+    for _, assignment in ipairs(entity.positions.assignments) do
+        local hf_id = assignment.histfig
+        if hf_id >= 0 then
+            for _, pos in ipairs(entity.positions.own) do
+                if pos.id == assignment.position_id then
+                    if pos.code == 'CAPTAIN_OF_THE_GUARD' or pos.code == 'SHERIFF' then
+                        local hf = df.historical_figure.find(hf_id)
+                        if hf and hf.unit_id >= 0 then
+                            local unit = df.unit.find(hf.unit_id)
+                            if unit and dfhack.units.isAlive(unit) then return unit end
+                        end
                     end
+                    break
                 end
             end
         end
@@ -428,15 +434,99 @@ function findCaptainOfGuard()
     return nil
 end
 
-function findHammerer()
-    for _, unit in ipairs(df.global.world.units.active) do
-        if dfhack.units.isCitizen(unit) and dfhack.units.isAlive(unit) then
-            local positions = dfhack.units.getNoblePositions(unit)
-            if positions then
-                for _, pos in ipairs(positions) do
-                    if pos.position and pos.position.code == 'HAMMERER' then
-                        return unit
+-- Returns a status table describing the law enforcement readiness:
+-- { captain, captain_name, captain_job, title, squad_id, squad_size, members_filled, members_idle, members }
+function getGuardSquadStatus()
+    local result = {
+        captain = nil,
+        captain_name = nil,
+        captain_job = nil,
+        title = nil,
+        is_sheriff = false,
+        squad_id = -1,
+        squad_size = 0,
+        members_filled = 0,
+        members_idle = 0,
+        members = {},
+    }
+    
+    local entity = df.historical_entity.find(df.global.plotinfo.group_id)
+    if not entity then return result end
+    
+    -- Find the law enforcement noble and their title
+    for _, assignment in ipairs(entity.positions.assignments) do
+        local hf_id = assignment.histfig
+        if hf_id >= 0 then
+            for _, pos in ipairs(entity.positions.own) do
+                if pos.id == assignment.position_id then
+                    if pos.code == 'CAPTAIN_OF_THE_GUARD' or pos.code == 'SHERIFF' then
+                        local hf = df.historical_figure.find(hf_id)
+                        if hf and hf.unit_id >= 0 then
+                            local unit = df.unit.find(hf.unit_id)
+                            if unit and dfhack.units.isAlive(unit) then
+                                result.captain = unit
+                                result.is_sheriff = (pos.code == 'SHERIFF')
+                                result.captain_name = dfhack.units.getReadableName(unit):match("([^,]+)") or dfhack.units.getReadableName(unit)
+                                result.title = pos.name[0] or pos.code:lower():gsub("_", " ")
+                                -- Get captain's current job
+                                if unit.job.current_job then
+                                    result.captain_job = df.job_type[unit.job.current_job.job_type] or "Working"
+                                else
+                                    result.captain_job = "IDLE"
+                                end
+                                -- Get squad info
+                                if unit.military.squad_id >= 0 then
+                                    result.squad_id = unit.military.squad_id
+                                    local sq = df.squad.find(unit.military.squad_id)
+                                    if sq then
+                                        result.squad_size = #sq.positions
+                                        for i, p in ipairs(sq.positions) do
+                                            if p.occupant >= 0 then
+                                                result.members_filled = result.members_filled + 1
+                                                local mhf = df.historical_figure.find(p.occupant)
+                                                local mu = mhf and df.unit.find(mhf.unit_id)
+                                                if mu then
+                                                    local is_idle = not mu.job.current_job
+                                                    if is_idle then result.members_idle = result.members_idle + 1 end
+                                                    table.insert(result.members, {
+                                                        unit = mu,
+                                                        name = dfhack.units.getReadableName(mu):match("([^,]+)") or "?",
+                                                        job = mu.job.current_job and (df.job_type[mu.job.current_job.job_type] or "Working") or "IDLE",
+                                                        is_captain = (mu.id == unit.id),
+                                                    })
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
                     end
+                    break
+                end
+            end
+        end
+    end
+    
+    return result
+end
+
+function findHammerer()
+    local entity = df.historical_entity.find(df.global.plotinfo.group_id)
+    if not entity then return nil end
+    for _, assignment in ipairs(entity.positions.assignments) do
+        local hf_id = assignment.histfig
+        if hf_id >= 0 then
+            for _, pos in ipairs(entity.positions.own) do
+                if pos.id == assignment.position_id then
+                    if pos.code == 'HAMMERER' then
+                        local hf = df.historical_figure.find(hf_id)
+                        if hf and hf.unit_id >= 0 then
+                            local unit = df.unit.find(hf.unit_id)
+                            if unit and dfhack.units.isAlive(unit) then return unit end
+                        end
+                    end
+                    break
                 end
             end
         end
@@ -461,8 +551,8 @@ function findAvailableJailRestraint()
             end
         end
         
-        -- Must be empty
-        if is_jail and not bld.chained then
+        -- Must be empty and fully built
+        if is_jail and not bld.chained and bld.flags.exists then
             return bld
         end
     end
@@ -496,10 +586,9 @@ function detainUnit(unit)
     end
     
     local ok, err = pcall(function()
-        -- Teleport unit to restraint
-        unit.pos.x = restraint.centerx
-        unit.pos.y = restraint.centery
-        unit.pos.z = restraint.z
+        -- Teleport unit to restraint safely to update map occupancy
+        local xyz = xyz2pos(restraint.centerx, restraint.centery, restraint.z)
+        dfhack.units.teleport(unit, xyz)
         
         -- Link building -> unit
         restraint.chained = unit
@@ -752,23 +841,17 @@ function getHfIntrigueData(hf, opt_no_armok_active)
     if intrigues.plots then
         for _, plot in ipairs(intrigues.plots) do
             if plot then
-                local plot_type_name = "Unknown"
-                pcall(function() plot_type_name = df.intrigue_plot_type[plot.plot_type] or "Unknown" end)
+                local plot_type_name = df.intrigue_plot_type[plot.plot_type] or "Unknown"
                 local actor_ids = {}
                 if plot.plot_agreements then
                     for _, pa in ipairs(plot.plot_agreements) do
-                        if pa then
-                            pcall(function() table.insert(actor_ids, pa.actor_id) end)
-                        end
+                        if pa then table.insert(actor_ids, pa.actor_id) end
                     end
                 end
                 
-                local on_hold = false
-                pcall(function() on_hold = plot.flags.on_hold end)
-                
                 table.insert(data.plots, {
                     type_name = plot_type_name,
-                    on_hold = on_hold,
+                    on_hold = plot.flags.on_hold,
                     actor_ids = actor_ids,
                     parameter = plot.parameter or -1,
                     actor_nemesis_id = plot.actor_nemesis_id or -1,
@@ -784,26 +867,13 @@ function getHfIntrigueData(hf, opt_no_armok_active)
     if intrigues.intrigue then
         for _, actor in ipairs(intrigues.intrigue) do
             if actor then
-                local role_name = "Unknown"
-                pcall(function() role_name = df.plot_role_type[actor.role] or "Unknown" end)
-                local strategy_name = "Unknown"
-                pcall(function() strategy_name = df.plot_strategy_type[actor.strategy] or "Unknown" end)
-                
-                local hf_1, hf_2, handle_actor_id, active_plot_ids = -1, -1, -1, nil
-                pcall(function()
-                    hf_1 = actor.hf_1
-                    hf_2 = actor.hf_2
-                    handle_actor_id = actor.handle_actor_id
-                    active_plot_ids = actor.active_plot_id
-                end)
-                
                 table.insert(data.actors, {
-                    hf_1 = hf_1,
-                    hf_2 = hf_2,
-                    role_name = role_name,
-                    strategy_name = strategy_name,
-                    handle_actor_id = handle_actor_id,
-                    active_plot_ids = active_plot_ids,
+                    hf_1 = actor.hf_1,
+                    hf_2 = actor.hf_2,
+                    role_name = df.plot_role_type[actor.role] or "Unknown",
+                    strategy_name = df.plot_strategy_type[actor.strategy] or "Unknown",
+                    handle_actor_id = actor.handle_actor_id,
+                    active_plot_ids = actor.active_plot_id,
                 })
                 data.actor_count = data.actor_count + 1
             end
@@ -921,9 +991,11 @@ function JusticeHQ:init()
                 local full_name = dfhack.units.getReadableName(u)
                 local first_name = full_name:match("^(%S+)") or full_name
                 
+                local c_category, c_is_criminal_org = getUnitCategoryAndOrg(u)
                 local s = {
                     unit = u,
-                    category = dfhack.units.isCitizen(u) and 'citizen' or (dfhack.units.isResident(u) and 'resident' or 'visitor'),
+                    category = c_category,
+                    is_criminal_org = c_is_criminal_org,
                     name = full_name,
                     first_name = first_name,
                     short_name = first_name .. " (" .. race_name .. ")",
@@ -1202,7 +1274,7 @@ function JusticeHQ:init()
                         },
                         widgets.CycleHotkeyLabel{
                             view_id = 'network_sort_cycle',
-                            frame = {l = 30, t = 0, w = 28},
+                            frame = {l = 34, t = 0, w = 28},
                             key = 'CUSTOM_CTRL_S',
                             label = 'Sort:',
                             options = {
@@ -1385,6 +1457,20 @@ function JusticeHQ:init()
         self:rebuildActiveTab()
     end
     self.init_complete = true
+    
+    -- Inject "Search:" label into all FilteredLists to make them discoverable
+    for _, list_id in ipairs({'suspect_list', 'cases_list', 'warrants_list', 'convicts_list', 'network_list', 'intel_list'}) do
+        local list = self.subviews[list_id]
+        if list and list.edit then
+            list.edit.frame.l = 9
+            list:addviews{
+                require('gui.widgets').Label{
+                    frame = {t = 0, l = 1},
+                    text = {{text = "Search:", pen = COLOR_LIGHTCYAN}}
+                }
+            }
+        end
+    end
 end
 
 -- ===========================
@@ -1415,6 +1501,127 @@ function getCrimeName(mode)
     return "Unknown Crime (Type " .. tostring(mode) .. ")"
 end
 
+-- Tiered plot scoring tables
+local PLOT_SCORE = {
+    -- Tier 1: Real fort-mode threats
+    Acquire_Artifact = 120,       -- verified via artifact.site
+    Infiltrate_Society = 60,      -- verified via entity_links
+    Grow_Corruption_Network = 40,
+    Grow_Asset_Network = 25,
+    -- Tier 2: Indirect / political
+    Attain_Rank = 30,
+    Frame_Actor = 25,
+    Corruptly_Punish_Actor = 20,
+    Corrupt_Actors_Government = 20,
+    Grow_Funding_Network = 10,
+    -- Tier 3: World-level (do not execute in fortress mode)
+    Assassinate_Actor = 5,
+    Kidnap_Actor = 5,
+    Direct_War_To_Actor = 5,
+    Sabotage_Actor = 5,
+    Counterintelligence = 5,
+    Become_Immortal = 5,
+    Undead_World_Conquest = 5,
+}
+
+local PLOT_DESC = {
+    Acquire_Artifact = "Plotting to steal a specific fortress artifact.",
+    Infiltrate_Society = "Embedding covert agents to gather intelligence and undermine governance.",
+    Grow_Corruption_Network = "Recruiting corrupt officials to serve as informants and co-conspirators.",
+    Grow_Asset_Network = "Building an operative network to provide logistical support for larger operations.",
+    Attain_Rank = "Manipulating fortress politics to gain a position of authority.",
+    Frame_Actor = "Planting false evidence to trigger wrongful convictions.",
+    Corruptly_Punish_Actor = "Abusing a position of authority to unjustly punish someone.",
+    Corrupt_Actors_Government = "Undermining civilization-level governance through bribery and coercion.",
+    Grow_Funding_Network = "Soliciting financial backing from wealthy contacts.",
+    Assassinate_Actor = "World-level assassination plot. Does not execute against fortress residents.",
+    Kidnap_Actor = "World-level abduction plot. No in-fortress abductions expected.",
+    Direct_War_To_Actor = "World-level military redirection. Does not directly affect fortress defense.",
+    Sabotage_Actor = "World-level sabotage operation. No in-fortress destruction expected.",
+    Counterintelligence = "Defensive counter-spy operations. Detecting enemy spies, not attacking.",
+    Become_Immortal = "Pursuing personal immortality. No direct fortress impact.",
+    Undead_World_Conquest = "Raising undead forces on the world stage. Long-term existential threat.",
+}
+
+local PLOT_COLOR = {
+    Acquire_Artifact = COLOR_LIGHTRED,
+    Infiltrate_Society = COLOR_LIGHTMAGENTA,
+    Grow_Corruption_Network = COLOR_YELLOW,
+    Grow_Asset_Network = COLOR_YELLOW,
+    Attain_Rank = COLOR_YELLOW,
+    Frame_Actor = COLOR_LIGHTMAGENTA,
+    Corruptly_Punish_Actor = COLOR_YELLOW,
+    Corrupt_Actors_Government = COLOR_YELLOW,
+    Grow_Funding_Network = COLOR_BROWN,
+    Assassinate_Actor = COLOR_DARKGREY,
+    Kidnap_Actor = COLOR_DARKGREY,
+    Direct_War_To_Actor = COLOR_DARKGREY,
+    Sabotage_Actor = COLOR_DARKGREY,
+    Counterintelligence = COLOR_DARKGREY,
+    Become_Immortal = COLOR_DARKGREY,
+    Undead_World_Conquest = COLOR_DARKGREY,
+}
+
+local function getArtifactDetails(plot_param, player_site)
+    local art_name = "unknown artifact"
+    local at_our_site = false
+    
+    pcall(function()
+        local artifact = df.artifact_record.find(plot_param)
+        if not artifact then return end
+        
+        at_our_site = (artifact.site == player_site)
+        local t_name = dfhack.translation.translateName(artifact.name, true)
+        local u_name = dfhack.translation.translateName(artifact.name, false)
+        
+        if t_name ~= "" and u_name ~= "" and t_name ~= u_name then
+            art_name = t_name .. " '" .. u_name .. "'"
+        elseif t_name ~= "" then
+            art_name = t_name
+        elseif u_name ~= "" then
+            art_name = u_name
+        end
+        
+        local item = artifact.item or (artifact.item_id and artifact.item_id >= 0 and df.item.find(artifact.item_id))
+        if item then
+            art_name = art_name .. " (" .. dfhack.items.getDescription(item, 0, true) .. ")"
+        end
+    end)
+    return art_name, at_our_site
+end
+
+local function getUnitCategoryAndOrg(unit)
+    local category = 'citizen'
+    if dfhack.units.isCitizen(unit) then
+        category = 'citizen'
+    elseif dfhack.units.isResident(unit) then
+        category = 'resident'
+    else
+        -- It's a visitor. Is it local or foreign?
+        if unit.civ_id == df.global.ui.civ_id then
+            category = 'visitor_local'
+        else
+            category = 'visitor_foreign'
+        end
+    end
+
+    -- Check criminal organization
+    local is_criminal_org = false
+    pcall(function()
+        local hf = df.historical_figure.find(unit.hist_figure_id)
+        if hf and hf.entity_links then
+            for _, link in ipairs(hf.entity_links) do
+                local ent = df.historical_entity.find(link.target)
+                if ent and ent.type == df.historical_entity_type.Outcast then
+                    is_criminal_org = true
+                    break
+                end
+            end
+        end
+    end)
+    return category, is_criminal_org
+end
+
 function JusticeHQ:buildEvidence(s)
     local evidence = {}
     local score = 0
@@ -1426,65 +1633,6 @@ function JusticeHQ:buildEvidence(s)
     local player_entity = -1
     pcall(function() player_site = df.global.plotinfo.site_id end)
     pcall(function() player_entity = df.global.plotinfo.civ_id end)
-
-    -- Tiered plot scoring tables
-    local PLOT_SCORE = {
-        -- Tier 1: Real fort-mode threats
-        Acquire_Artifact = 120,       -- verified via artifact.site
-        Infiltrate_Society = 60,      -- verified via entity_links
-        Grow_Corruption_Network = 40,
-        Grow_Asset_Network = 25,
-        -- Tier 2: Indirect / political
-        Attain_Rank = 30,
-        Frame_Actor = 25,
-        Corruptly_Punish_Actor = 20,
-        Corrupt_Actors_Government = 20,
-        Grow_Funding_Network = 10,
-        -- Tier 3: World-level (do not execute in fortress mode)
-        Assassinate_Actor = 5,
-        Kidnap_Actor = 5,
-        Direct_War_To_Actor = 5,
-        Sabotage_Actor = 5,
-        Counterintelligence = 5,
-        Become_Immortal = 5,
-        Undead_World_Conquest = 5,
-    }
-    local PLOT_DESC = {
-        Acquire_Artifact = "Plotting to steal a specific fortress artifact.",
-        Infiltrate_Society = "Embedding covert agents to gather intelligence and undermine governance.",
-        Grow_Corruption_Network = "Recruiting corrupt officials to serve as informants and co-conspirators.",
-        Grow_Asset_Network = "Building an operative network to provide logistical support for larger operations.",
-        Attain_Rank = "Manipulating fortress politics to gain a position of authority.",
-        Frame_Actor = "Planting false evidence to trigger wrongful convictions.",
-        Corruptly_Punish_Actor = "Abusing a position of authority to unjustly punish someone.",
-        Corrupt_Actors_Government = "Undermining civilization-level governance through bribery and coercion.",
-        Grow_Funding_Network = "Soliciting financial backing from wealthy contacts.",
-        Assassinate_Actor = "World-level assassination plot. Does not execute against fortress residents.",
-        Kidnap_Actor = "World-level abduction plot. No in-fortress abductions expected.",
-        Direct_War_To_Actor = "World-level military redirection. Does not directly affect fortress defense.",
-        Sabotage_Actor = "World-level sabotage operation. No in-fortress destruction expected.",
-        Counterintelligence = "Defensive counter-spy operations. Detecting enemy spies, not attacking.",
-        Become_Immortal = "Pursuing personal immortality. No direct fortress impact.",
-        Undead_World_Conquest = "Raising undead forces on the world stage. Long-term existential threat.",
-    }
-    local PLOT_COLOR = {
-        Acquire_Artifact = COLOR_LIGHTRED,
-        Infiltrate_Society = COLOR_LIGHTMAGENTA,
-        Grow_Corruption_Network = COLOR_YELLOW,
-        Grow_Asset_Network = COLOR_YELLOW,
-        Attain_Rank = COLOR_YELLOW,
-        Frame_Actor = COLOR_LIGHTMAGENTA,
-        Corruptly_Punish_Actor = COLOR_YELLOW,
-        Corrupt_Actors_Government = COLOR_YELLOW,
-        Grow_Funding_Network = COLOR_BROWN,
-        Assassinate_Actor = COLOR_DARKGREY,
-        Kidnap_Actor = COLOR_DARKGREY,
-        Direct_War_To_Actor = COLOR_DARKGREY,
-        Sabotage_Actor = COLOR_DARKGREY,
-        Counterintelligence = COLOR_DARKGREY,
-        Become_Immortal = COLOR_DARKGREY,
-        Undead_World_Conquest = COLOR_DARKGREY,
-    }
 
     if hf then
         if idata and idata.is_villain then
@@ -1507,43 +1655,8 @@ function JusticeHQ:buildEvidence(s)
                 local op_notes = {}
                 -- Tier 1 verification: Acquire_Artifact — check if artifact is at our site
                 if type_key == "Acquire_Artifact" and plot.parameter > 0 and not plot.on_hold then
-                    local art_name = "unknown artifact"
-                    local at_our_site = false
-                    pcall(function()
-                        local artifact = df.artifact_record.find(plot.parameter)
-                        if artifact then
-                            pcall(function() 
-                                local translated = dfhack.translation.translateName(artifact.name, true)
-                                local untranslated = dfhack.translation.translateName(artifact.name, false)
-                                if translated ~= "" and untranslated ~= "" and translated ~= untranslated then
-                                    art_name = translated .. " '" .. untranslated .. "'"
-                                elseif translated ~= "" then
-                                    art_name = translated
-                                elseif untranslated ~= "" then
-                                    art_name = untranslated
-                                end
-                            end)
-                            
-                            -- Extract the actual item type (e.g. "pig tail turban")
-                            pcall(function()
-                                if artifact.item then
-                                    local item = df.item.find(artifact.item.id)
-                                    if item then
-                                        local item_desc = dfhack.items.getDescription(item, 0, true)
-                                        art_name = art_name .. " (" .. item_desc .. ")"
-                                    end
-                                elseif artifact.item_id and artifact.item_id >= 0 then
-                                    local item = df.item.find(artifact.item_id)
-                                    if item then
-                                        local item_desc = dfhack.items.getDescription(item, 0, true)
-                                        art_name = art_name .. " (" .. item_desc .. ")"
-                                    end
-                                end
-                            end)
-                            
-                            at_our_site = (artifact.site == player_site)
-                        end
-                    end)
+                    local art_name, at_our_site = getArtifactDetails(plot.parameter, player_site)
+                    
                     if at_our_site then
                         base_pts = 120
                         desc = "Targeting fortress artifact '" .. art_name .. "' for theft. Immediate interception recommended."
@@ -1689,21 +1802,39 @@ function JusticeHQ:buildEvidence(s)
         })
     end
 
-    -- 3. Non-citizen status
-    if s.category == 'visitor' then
+    -- 3. Non-citizen & Organization status
+    if s.is_criminal_org then
+        local pts = 30
+        score = score + pts
+        table.insert(evidence, {
+            text = "Criminal Syndicate Member",
+            detail = "Verified member of a known criminal organization or bandit group.",
+            pts = pts, color = COLOR_LIGHTRED,
+        })
+    end
+
+    if s.category == 'visitor_foreign' then
         local pts = 15
         score = score + pts
         table.insert(evidence, {
-            text = "Non-citizen: Visiting the fortress",
-            detail = "Foreign nationals cannot be sentenced through normal dwarven justice.",
+            text = "Non-citizen: Foreign Visitor",
+            detail = "Foreign nationals cannot be imprisoned (jail sentences ignored), but may be beaten or hammered.",
             pts = pts, color = COLOR_LIGHTCYAN,
+        })
+    elseif s.category == 'visitor_local' then
+        local pts = 5
+        score = score + pts
+        table.insert(evidence, {
+            text = "Non-citizen: Local Visitor",
+            detail = "Visitor from your civilization. Cannot be imprisoned, but may be beaten or hammered.",
+            pts = pts, color = COLOR_CYAN,
         })
     elseif s.category == 'resident' then
         local pts = 5
         score = score + pts
         table.insert(evidence, {
             text = "Non-citizen: Resident",
-            detail = "Long-term foreign resident. May have limited justice coverage.",
+            detail = "Long-term foreign resident. Can be fully processed by the justice system.",
             pts = pts, color = COLOR_CYAN,
         })
     end
@@ -1711,7 +1842,8 @@ function JusticeHQ:buildEvidence(s)
     -- 4. Risky profession
     local risky_profs = {THIEF=true, MASTER_THIEF=true, CRIMINAL=true}
     pcall(function()
-        if risky_profs[df.profession[s.unit.profession]] then
+        local prof_name = df.profession[s.unit.profession]
+        if prof_name and risky_profs[prof_name] then
             local pts = 20
             score = score + pts
             table.insert(evidence, {
@@ -1725,19 +1857,19 @@ function JusticeHQ:buildEvidence(s)
     -- MITIGATING FACTORS (negative points)
     -- ===========================
 
-    -- 5. Long-term resident / citizen loyalty
+    -- 5. Long-term resident / citizen loyalty (Elder Citizen)
     if s.category == 'citizen' then
-        local years_in_fort = 0
+        local age = 0
         pcall(function()
             if s.unit.birth_year > 0 then
-                years_in_fort = df.global.cur_year - s.unit.birth_year
+                age = df.global.cur_year - s.unit.birth_year
             end
         end)
-        if years_in_fort > 20 then
+        if age > 100 then
             local pts = -15
             score = score + pts
             table.insert(evidence, {
-                text = "Long-serving citizen (" .. years_in_fort .. " years)",
+                text = "Elder Citizen (" .. age .. " years old)",
                 pts = pts, color = COLOR_GREEN,
             })
         end
@@ -1888,7 +2020,8 @@ function JusticeHQ:buildChoices()
             
             local cat_badge = string.upper(s.category)
             local badge_color = COLOR_DARKGREY
-            if s.category == 'visitor' then badge_color = COLOR_LIGHTCYAN
+            if s.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
+            elseif s.category == 'visitor_local' then badge_color = COLOR_CYAN
             elseif s.category == 'resident' then badge_color = COLOR_CYAN end
             
             -- Network info
@@ -2482,7 +2615,8 @@ function JusticeHQ:buildWarrantsChoices()
         
         local cat_badge = string.upper(s.category)
         local badge_color = COLOR_DARKGREY
-        if s.category == 'visitor' then badge_color = COLOR_LIGHTCYAN
+        if s.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
+        elseif s.category == 'visitor_local' then badge_color = COLOR_CYAN
         elseif s.category == 'resident' then badge_color = COLOR_CYAN end
 
         local open_crimes = getOpenCrimes(s.unit.hist_figure_id)
@@ -2692,12 +2826,13 @@ function JusticeHQ:buildConvictChoices()
                 if p_data.beating > 0 then sentence_str = sentence_str .. p_data.beating .. " beatings pending. " end
                 if p_data.hammer > 0 then sentence_str = sentence_str .. p_data.hammer .. " hammer strikes pending. " end
                 
-                -- Find most recent crime date for this convict
+                -- Find most recent crime date for this convict using the cache
                 local crime_date_str = ""
-                for _, crime in ipairs(df.global.world.crimes.all) do
-                    if crime.criminal == unit.id or crime.accused == unit.id then
-                        crime_date_str = dfDateString(crime.event_year, crime.event_time)
-                    end
+                local cdata = getUnitCrimeData(unit)
+                if cdata and cdata.crimes_list and #cdata.crimes_list > 0 then
+                    -- The crimes_list is chronological, so the last element is the most recent
+                    local last_crime = cdata.crimes_list[#cdata.crimes_list]
+                    crime_date_str = dfDateString(last_crime.event_year, last_crime.event_time)
                 end
                 if crime_date_str ~= "" then
                     crime_date_str = " [" .. crime_date_str .. "]"
@@ -2716,6 +2851,7 @@ function JusticeHQ:buildConvictChoices()
                 end
                 
                 -- Fake suspect wrapper so 'onSelectSuspect' handles it properly
+                local c_category, c_is_criminal_org = getUnitCategoryAndOrg(unit)
                 local suspect_data = {
                     unit = unit,
                     first_name = name,
@@ -2726,7 +2862,8 @@ function JusticeHQ:buildConvictChoices()
                     gender = gender,
                     threat = "Medium",
                     reason_lines = {"Serving sentence."},
-                    category = dfhack.units.isCitizen(unit) and "citizen" or "visitor",
+                    category = c_category,
+                    is_criminal_org = c_is_criminal_org,
                     evidence = {{text = "Serving Sentence: " .. sentence_str, pts = 0, color = COLOR_LIGHTRED}},
                     score = 0,
                     crime_data = getUnitCrimeData(unit)
@@ -2734,7 +2871,8 @@ function JusticeHQ:buildConvictChoices()
                 
                 local cat_badge = string.upper(suspect_data.category)
                 local badge_color = COLOR_DARKGREY
-                if suspect_data.category == 'visitor' then badge_color = COLOR_LIGHTCYAN
+                if suspect_data.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
+                elseif suspect_data.category == 'visitor_local' then badge_color = COLOR_CYAN
                 elseif suspect_data.category == 'resident' then badge_color = COLOR_CYAN end
                 
                 local text_arr = {
@@ -2898,6 +3036,7 @@ function JusticeHQ:calculatePOI()
     local best_poi = nil
     local best_score = -9999
     for s, score in pairs(poi_scores) do
+        s.poi_score = score
         if score > best_score then
             best_score = score
             best_poi = s
@@ -2992,14 +3131,28 @@ function JusticeHQ:buildPOICard(poi)
     -- Category badge
     local cat_badge = string.upper(poi.category or "")
     local badge_color = COLOR_DARKGREY
-    if poi.category == 'visitor' then badge_color = COLOR_LIGHTCYAN
+    if poi.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
+    elseif poi.category == 'visitor_local' then badge_color = COLOR_CYAN
     elseif poi.category == 'resident' then badge_color = COLOR_CYAN end
     
-    -- Threat display
+    -- Threat display (use boosted score if available to reflect actual priority)
+    local effective_score = poi.poi_score or poi.score or 0
     local threat_color = COLOR_DARKGREY
-    if poi.threat == 'High' then threat_color = COLOR_LIGHTRED
-    elseif poi.threat == 'Medium' then threat_color = COLOR_YELLOW end
+    if poi.threat == 'High' or effective_score >= 300 then threat_color = COLOR_LIGHTRED
+    elseif poi.threat == 'Medium' or effective_score >= 100 then threat_color = COLOR_YELLOW end
     
+    -- Clean up verbose names by stripping professions
+    local clean_name = (poi.name or ""):match("([^,]+)") or poi.name
+    local clean_mname = poi.mastermind_name and poi.mastermind_name:match("([^,]+)") or poi.mastermind_name
+    
+    local profession = (poi.name or ""):match(",%s*(.+)")
+    if profession then
+        -- Capitalize words
+        profession = profession:gsub("(%a)([%w_']*)", function(first, rest)
+            return first:upper() .. rest:lower()
+        end)
+    end
+
     -- Build the card rows
     local border = string.char(205):rep(78)
     
@@ -3013,34 +3166,51 @@ function JusticeHQ:buildPOICard(poi)
     table.insert(choices, {
         text = {
             {text = " " .. string.char(15) .. " PERSON OF INTEREST: ", pen = COLOR_YELLOW},
-            {text = poi.name, pen = COLOR_WHITE},
+            {text = clean_name, pen = COLOR_WHITE},
             {text = "  ", pen = COLOR_DARKGREY},
             {text = cat_badge, pen = badge_color},
         },
         data = poi,
     })
     
-    -- Mastermind context row (Option C: convicted network link)
-    if poi.mastermind_name then
+    if profession then
         table.insert(choices, {
             text = {
-                {text = "   Part of: ", pen = COLOR_DARKGREY},
-                {text = poi.mastermind_name, pen = COLOR_LIGHTMAGENTA},
-                {text = "'s network", pen = COLOR_DARKGREY},
-                {text = "  (" .. (poi.mastermind_status or "CONVICTED") .. ")", pen = COLOR_LIGHTRED},
+                {text = "   Profession: ", pen = COLOR_GREY},
+                {text = profession, pen = COLOR_LIGHTCYAN},
+            },
+            data = poi,
+        })
+    end
+    
+    -- Mastermind context row (Option C: convicted network link)
+    if poi.mastermind_name then
+        local mstatus = poi.mastermind_status or "CONVICTED"
+        local mstatus_display = mstatus == "DEAD" and "[DEAD]" or ("[" .. mstatus .. "]")
+        local mstatus_color = (mstatus == "DEAD") and COLOR_RED or COLOR_LIGHTRED
+        table.insert(choices, {
+            text = {
+                {text = "   Part of: ", pen = COLOR_GREY},
+                {text = clean_mname .. "'s network", pen = COLOR_LIGHTMAGENTA},
+                {text = "  " .. mstatus_display, pen = mstatus_color},
             },
             data = poi,
         })
     end
     
     -- Threat + Strategy row
+    local threat_str = string.upper(poi.threat or "Unknown")
+    local threat_display_score = poi.poi_score or poi.score or 0
+    if poi.mastermind_name then
+        threat_str = threat_str .. " (NETWORK SUSPECT)"
+    end
     local threat_row = {
-        {text = "   Threat: ", pen = COLOR_DARKGREY},
-        {text = string.upper(poi.threat or "Unknown"), pen = threat_color},
-        {text = "  [" .. (poi.score or 0) .. " pts]", pen = COLOR_DARKGREY},
+        {text = "   Threat: ", pen = COLOR_GREY},
+        {text = threat_str, pen = threat_color},
+        {text = "  [" .. threat_display_score .. " pts]", pen = COLOR_BROWN},
     }
     if strategy_text ~= "" then
-        table.insert(threat_row, {text = "  |  ", pen = COLOR_DARKGREY})
+        table.insert(threat_row, {text = "  |  ", pen = COLOR_GREY})
         table.insert(threat_row, {text = strategy_text, pen = COLOR_YELLOW})
     end
     table.insert(choices, {text = threat_row, data = poi})
@@ -3048,7 +3218,7 @@ function JusticeHQ:buildPOICard(poi)
     -- Status row
     table.insert(choices, {
         text = {
-            {text = "   Status: ", pen = COLOR_DARKGREY},
+            {text = "   Status: ", pen = COLOR_GREY},
             {text = status_text, pen = status_color},
         },
         data = poi,
@@ -3056,7 +3226,10 @@ function JusticeHQ:buildPOICard(poi)
     
     -- Override recommendation for network-linked POI
     if poi.mastermind_name and (not watch or watch.status ~= 'confessed') then
-        rec_text = "Interrogate to dismantle " .. poi.mastermind_name .. "'s network. Press [i]."
+        local target_name = clean_mname or poi.mastermind_name
+        local mstatus = poi.mastermind_status or "CONVICTED"
+        local status_phrase = (mstatus == "DEAD") and "the remnants of " or ""
+        rec_text = "Interrogate " .. poi.first_name .. " to dismantle " .. status_phrase .. target_name .. "'s network. Press [i]."
         rec_color = COLOR_LIGHTGREEN
     end
     
@@ -3089,6 +3262,112 @@ end
 function JusticeHQ:buildNetworkChoices()
     local list_choices = {}
     
+    -- Law Enforcement Status Bar
+    local gs = getGuardSquadStatus()
+    if gs.captain then
+        -- Captain job display
+        local job_display = gs.captain_job
+        local job_color = COLOR_LIGHTGREEN
+        if job_display == "IDLE" then
+            job_display = "AVAILABLE"
+            job_color = COLOR_LIGHTGREEN
+        elseif job_display == "InterrogateSubject" then
+            job_display = "INTERROGATING"
+            job_color = COLOR_LIGHTCYAN
+        elseif job_display == "Sleep" or job_display == "Rest" then
+            job_display = "SLEEPING"
+            job_color = COLOR_YELLOW
+        elseif job_display == "Eat" or job_display == "Drink" then
+            job_display = "EATING"
+            job_color = COLOR_YELLOW
+        elseif job_display == "AttackBuilding" or job_display == "AttackUnit" or job_display == "CombatTraining" then
+            job_display = "IN COMBAT"
+            job_color = COLOR_LIGHTRED
+        else
+            job_display = job_display:gsub("(%u)", " %1"):gsub("^%s+", ""):upper()
+            job_color = COLOR_BROWN
+        end
+        
+        -- Title (capitalize first letter of each word)
+        local title = (gs.title or "captain of the guard"):gsub("(%a)([%w_']*)", function(f, r) return f:upper() .. r end)
+        
+        -- Squad strength (Sheriff is solo by design; Captain can have a squad)
+        local squad_text, squad_color, squad_hint
+        if gs.is_sheriff then
+            squad_text = "SOLO LAW ENFORCEMENT"
+            squad_color = COLOR_CYAN
+            squad_hint = "  Promotes to Captain of the Guard at 50 pop"
+        elseif gs.squad_id < 0 then
+            squad_text = "NO SQUAD"
+            squad_color = COLOR_LIGHTRED
+            squad_hint = "  " .. string.char(16) .. " Assign a squad via Military screen"
+        elseif gs.members_filled <= 1 then
+            squad_text = "UNDERSTAFFED (" .. gs.members_filled .. "/" .. gs.squad_size .. ")"
+            squad_color = COLOR_YELLOW
+            squad_hint = nil
+        else
+            squad_text = gs.members_filled .. "/" .. gs.squad_size .. " (" .. gs.members_idle .. " idle)"
+            squad_color = COLOR_LIGHTGREEN
+            squad_hint = nil
+        end
+        
+        table.insert(list_choices, {
+            text = {
+                {text = " " .. string.char(15) .. " ", pen = COLOR_LIGHTCYAN},
+                {text = title .. ": ", pen = COLOR_GREY},
+                {text = gs.captain_name, pen = COLOR_WHITE},
+                {text = "  [", pen = COLOR_GREY},
+                {text = job_display, pen = job_color},
+                {text = "]", pen = COLOR_GREY},
+            },
+            data = nil,
+            search_key = "",
+        })
+        local guard_row = {
+            {text = "   Fortress Guard: ", pen = COLOR_GREY},
+            {text = squad_text, pen = squad_color},
+        }
+        if squad_hint then
+            table.insert(guard_row, {text = squad_hint, pen = COLOR_YELLOW})
+        end
+        table.insert(list_choices, {
+            text = guard_row,
+            data = nil,
+            search_key = "",
+        })
+        -- Warning if Captain has a squad but it's understaffed
+        if not gs.is_sheriff and gs.squad_id >= 0 and gs.members_filled <= 1 then
+            table.insert(list_choices, {
+                text = {
+                    {text = "   " .. string.char(16) .. " ", pen = COLOR_YELLOW},
+                    {text = "Arrests will stall! Assign guards to enforce warrants.", pen = COLOR_YELLOW},
+                },
+                data = nil,
+                search_key = "",
+            })
+        end
+        table.insert(list_choices, {
+            text = {{text = string.char(196):rep(78), pen = COLOR_GREY}},
+            data = nil,
+            search_key = "",
+        })
+    else
+        table.insert(list_choices, {
+            text = {
+                {text = " " .. string.char(15) .. " ", pen = COLOR_LIGHTRED},
+                {text = "NO LAW ENFORCEMENT", pen = COLOR_LIGHTRED},
+                {text = "  " .. string.char(16) .. " Appoint a Captain of the Guard or Sheriff (n)", pen = COLOR_YELLOW},
+            },
+            data = nil,
+            search_key = "",
+        })
+        table.insert(list_choices, {
+            text = {{text = string.char(196):rep(78), pen = COLOR_GREY}},
+            data = nil,
+            search_key = "",
+        })
+    end
+    
     -- Person of Interest card at the top
     local poi = self:calculatePOI()
     local poi_card = self:buildPOICard(poi)
@@ -3108,6 +3387,9 @@ function JusticeHQ:buildNetworkChoices()
     end
     
     -- For each suspect, check if they have an intrigue perspective (meaning they ARE a villain/mastermind)
+    local all_network_actors = {}
+    local non_villain_suspects = {}
+    
     for _, s in ipairs(self.suspects) do
         local hf = df.historical_figure.find(s.unit.hist_figure_id)
         if hf then
@@ -3121,28 +3403,22 @@ function JusticeHQ:buildNetworkChoices()
                     plot_count = idata.plot_count,
                 }
                 villain_networks[s.unit.hist_figure_id] = network
+                
+                -- Record all actors in this network for O(1) lookup
+                for _, actor in ipairs(idata.actors) do
+                    if actor.hf_1 ~= -1 then all_network_actors[actor.hf_1] = true end
+                    if actor.hf_2 ~= -1 then all_network_actors[actor.hf_2] = true end
+                end
             else
-                -- Check if this suspect appears as a target in another villain's network
-                local found_in_network = false
-                for _, other_s in ipairs(self.suspects) do
-                    if other_s ~= s then
-                        local other_hf = df.historical_figure.find(other_s.unit.hist_figure_id)
-                        if other_hf then
-                            local other_idata = getHfIntrigueData(other_hf)
-                            for _, actor in ipairs(other_idata.actors) do
-                                if actor.hf_1 == s.unit.hist_figure_id or actor.hf_2 == s.unit.hist_figure_id then
-                                    found_in_network = true
-                                    break
-                                end
-                            end
-                        end
-                        if found_in_network then break end
-                    end
-                end
-                if not found_in_network then
-                    table.insert(unaffiliated, s)
-                end
+                table.insert(non_villain_suspects, s)
             end
+        end
+    end
+    
+    -- Check if non-villains appear as a target in any villain's network
+    for _, s in ipairs(non_villain_suspects) do
+        if not all_network_actors[s.unit.hist_figure_id] then
+            table.insert(unaffiliated, s)
         end
     end
     
@@ -3174,15 +3450,21 @@ function JusticeHQ:buildNetworkChoices()
     for _, network in ipairs(sorted_networks) do
         net_idx = net_idx + 1
         local plot_summary = network.plot_count > 0 and (network.plot_count .. " Active Plot(s)") or "No Active Plots"
-        local header = string.format(" %s NETWORK #%d: %s %s %s ",
-            string.char(196):rep(3),
-            net_idx,
-            network.mastermind.first_name,
-            string.char(196):rep(3),
-            plot_summary)
-        if #header < 80 then header = header .. string.char(196):rep(80 - #header) end
+        local part1 = string.format(" %s NETWORK #%d: ", string.char(196):rep(3), net_idx)
+        local part2 = network.mastermind.first_name
+        local part3 = string.format(" %s %s ", string.char(196):rep(3), plot_summary)
+        
+        local total_len = #part1 + #part2 + #part3
+        if total_len < 80 then
+            part3 = part3 .. string.char(196):rep(80 - total_len)
+        end
+        
         table.insert(list_choices, {
-            text = {{text = header, pen = COLOR_LIGHTBLUE}},
+            text = {
+                {text = part1, pen = COLOR_LIGHTBLUE},
+                {text = part2, pen = COLOR_WHITE},
+                {text = part3, pen = COLOR_LIGHTBLUE}
+            },
             data = network.mastermind,
             tooltip_info = {type = 'mastermind', name = network.mastermind.first_name}
         })
@@ -3223,14 +3505,23 @@ function JusticeHQ:buildNetworkChoices()
             
             local cat_badge = ""
             local badge_color = COLOR_DARKGREY
+            local name_color = COLOR_WHITE
             if target_s then
                 cat_badge = string.upper(target_s.category)
-                if target_s.category == 'visitor' then badge_color = COLOR_LIGHTCYAN
-                elseif target_s.category == 'resident' then badge_color = COLOR_CYAN end
+                if target_s.category == 'visitor_foreign' then 
+                    badge_color = COLOR_LIGHTCYAN
+                    name_color = COLOR_LIGHTCYAN
+                elseif target_s.category == 'visitor_local' then 
+                    badge_color = COLOR_CYAN
+                    name_color = COLOR_CYAN
+                elseif target_s.category == 'resident' then 
+                    badge_color = COLOR_CYAN
+                    name_color = COLOR_CYAN
+                end
             end
             
             local text_arr = {
-                {text = string.format("   %s %-32s ", string.char(16), target_name), pen = COLOR_WHITE},
+                {text = string.format("   %s %-32s ", string.char(16), target_name), pen = name_color},
                 {text = string.format("%-22s ", role_display), pen = ROLE_COLORS[actor.role_name] or COLOR_LIGHTRED},
                 {text = cat_badge, pen = badge_color},
                 NEWLINE,
@@ -3289,7 +3580,8 @@ function JusticeHQ:buildNetworkChoices()
         for _, s in ipairs(unaffiliated) do
             local cat_badge = string.upper(s.category)
             local badge_color = COLOR_DARKGREY
-            if s.category == 'visitor' then badge_color = COLOR_LIGHTCYAN
+            if s.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
+            elseif s.category == 'visitor_local' then badge_color = COLOR_CYAN
             elseif s.category == 'resident' then badge_color = COLOR_CYAN end
             
             local crimes_summary = "No crimes on file"
@@ -3382,6 +3674,7 @@ function JusticeHQ:onSelectCase(idx, choice)
             elseif unit.sex == 1 then gender = string.char(11) end
             local full_name = dfhack.units.getReadableName(unit)
             local first_name = full_name:match('^(%S+)') or full_name
+            local c_category, c_is_criminal_org = getUnitCategoryAndOrg(unit)
             self.selected_suspect = {
                 unit = unit,
                 first_name = first_name,
@@ -3392,7 +3685,8 @@ function JusticeHQ:onSelectCase(idx, choice)
                 gender = gender,
                 threat = 'Medium',
                 reason_lines = {'Accused of a crime.'},
-                category = dfhack.units.isCitizen(unit) and 'citizen' or (dfhack.units.isVisiting(unit) and 'visitor' or 'resident'),
+                category = c_category,
+                is_criminal_org = c_is_criminal_org,
                 score = 0,
                 crime_data = getUnitCrimeData(unit),
             }
@@ -4014,9 +4308,7 @@ function JusticeHQ:gatherSuspects()
                 end
                 
                 -- Category label
-                local category = "citizen"
-                if dfhack.units.isVisiting(unit) then category = "visitor"
-                elseif not dfhack.units.isCitizen(unit) then category = "resident" end
+                local c_category, c_is_criminal_org = getUnitCategoryAndOrg(unit)
                 
                 local full_name = dfhack.units.getReadableName(unit)
                 local first_name = full_name:match("^(%S+)") or full_name
@@ -4030,7 +4322,8 @@ function JusticeHQ:gatherSuspects()
                     prof = dfhack.units.getProfessionName(unit),
                     race = race_name,
                     gender = gender,
-                    category = category,
+                    category = c_category,
+                    is_criminal_org = c_is_criminal_org,
                     threat = threat,
                     reason_lines = reason_lines,
                     next_plot = next_plot,
@@ -4287,10 +4580,12 @@ function JusticeHQ:serializeCurrentTab()
                 table.insert(lines, "")
                 local text = ''
                 if r.details then
+                    local detail_lines = {}
                     for di = 0, #r.details - 1 do
                         local str_ptr = r.details[di]
-                        if str_ptr then text = text .. (di > 0 and '\n' or '') .. tostring(str_ptr.value) end
+                        if str_ptr then table.insert(detail_lines, tostring(str_ptr.value)) end
                     end
+                    text = table.concat(detail_lines, '\n')
                 end
                 for s in text:gmatch("[^\r\n]+") do
                     table.insert(lines, s)
@@ -5041,6 +5336,19 @@ monitor_last_scheduled_tick = monitor_last_scheduled_tick or nil
 
 
 
+function hasOpenCrimes(hfid)
+    if not CRIME_CACHE_HFID then return false end
+    local hf_crimes = CRIME_CACHE_HFID[hfid]
+    if not hf_crimes then return false end
+    
+    for _, crime in ipairs(hf_crimes) do
+        if crime.flags.needs_trial and crime.flags.discovered and crime.criminal_hf and crime.criminal_hf.hfid == hfid then
+            return true
+        end
+    end
+    return false
+end
+
 function getOpenCrimes(hfid)
     local open_crimes = {}
     if not CRIME_CACHE_HFID then return open_crimes end
@@ -5057,8 +5365,7 @@ end
 
 function isConvictable(suspect)
     if not suspect or not suspect.unit then return false end
-    local open_crimes = getOpenCrimes(suspect.unit.hist_figure_id)
-    return #open_crimes > 0
+    return hasOpenCrimes(suspect.unit.hist_figure_id)
 end
 
 function isSuspectStillThreat(uid)
@@ -5260,7 +5567,7 @@ function interrogationMonitorTick()
                             end
                         elseif watch.status == 'dispatched' then
                             local elapsed = df.global.cur_year_tick - (watch.dispatched_tick or 0)
-                            if elapsed < 0 then elapsed = 999 end
+                            if elapsed < 0 then elapsed = elapsed + 403200 end -- handle year wrap
                             if not guard_is_busy_justice and elapsed >= 100 then
                                 -- Guard is idle, enough time passed, but NO report appeared. Job interrupted.
                                 watch.status = 'active'
@@ -5428,17 +5735,14 @@ function CIHQNotifyOverlay:render(dc)
                 color = COLOR_LIGHTRED
             end
 
-            -- Draw a solid background strip for readability (black background)
+            -- Draw the colored text with an explicit black background strip for readability
             local text = notif.text
-            local strip_len = math.min(#text + 2, sw - 2)
-            local bg_pen = dfhack.pen.parse{fg=COLOR_BLACK, bg=COLOR_BLACK}
-            for x = 0, strip_len - 1 do
-                dc:seek(x, y):char(' ', bg_pen)
+            local padded_text = " " .. text .. " "
+            if sw > 0 and #padded_text > sw then
+                padded_text = padded_text:sub(1, sw)
             end
-
-            -- Draw the colored text with explicit black background
             local text_pen = dfhack.pen.parse{fg=color, bg=COLOR_BLACK}
-            dc:seek(1, y):pen(text_pen):string(text)
+            dc:seek(0, y):pen(text_pen):string(padded_text)
         end
     end
 end
@@ -5635,12 +5939,17 @@ local function processNewCrimes(is_initial_scan)
                         dialog:show()
                         showed_popup_this_loop = true
                     elseif accused_unit and dfhack.units.isActive(accused_unit) and not dfhack.units.isDead(accused_unit) then
-                        local thief_name = dfhack.units.getReadableName(accused_unit)
-                        cihq_announce(
-                            "CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " detected! (No guards were nearby to intercept). Handle manually via CI-HQ.", COLOR_YELLOW, true)
+                        -- If Realistic Arrests is ON, this means the thief was NOT caught. The crime is completely silent.
+                        if not isRealisticArrestsEnabled() then
+                            local thief_name = dfhack.units.getReadableName(accused_unit)
+                            cihq_announce(
+                                "CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " detected! (No guards were nearby to intercept). Handle manually via CI-HQ.", COLOR_YELLOW, true)
+                        end
                     else
-                        cihq_announce(
-                            "CI-HQ ALERT: " .. crime_name .. " detected! Suspect not found on map. Check Cases tab.", COLOR_LIGHTRED, true)
+                        if not isRealisticArrestsEnabled() then
+                            cihq_announce(
+                                "CI-HQ ALERT: " .. crime_name .. " detected! Suspect not found on map. Check Cases tab.", COLOR_LIGHTRED, true)
+                        end
                     end
                 end
             end
@@ -5670,8 +5979,24 @@ function ci_alert_monitor_tick()
     pcall(function() no_armok_active = require('plugins.overlay').isOverlayEnabled('gui/justice-hq.no_armok') end)
     local villain_alerts_active = isVillainEntryAlertsEnabled()
     
-    -- Pre-build the crime cache once per cycle to prevent O(N^2) freezing
-    initCrimeCache()
+    -- Abort completely if the fortress has no justice system (Captain of the Guard or Sheriff/Hammerer)
+    -- You cannot run an intelligence network without law enforcement.
+    local guard = findCaptainOfGuard()
+    local sheriff = findHammerer()
+    if not guard and not sheriff then
+        if not GLOBAL_INITIAL_SCAN_DONE then
+            cihq_announce("CI-HQ: Intelligence network disabled! Appoint a Captain of the Guard or Sheriff to enable suspect alerts.", COLOR_LIGHTRED, true)
+            GLOBAL_INITIAL_SCAN_DONE = true
+        end
+        return
+    end
+    
+    -- Pre-build the crime cache only if new crimes were added or cache is missing, to prevent O(N^2) freezing
+    local current_crime_count = #df.global.world.crimes.all
+    if not CRIME_CACHE or GLOBAL_LAST_CRIME_COUNT ~= current_crime_count then
+        initCrimeCache()
+        GLOBAL_LAST_CRIME_COUNT = current_crime_count
+    end
     
     for _, unit in ipairs(df.global.world.units.active) do
         if dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then goto skip_mon end
@@ -5734,7 +6059,7 @@ function ci_alert_monitor_tick()
             end
             
             if is_suspect then
-                if not is_initial_scan then
+                if not is_initial_scan and villain_alerts_active then
                     local name = dfhack.units.getReadableName(unit)
                     cihq_announce("CI-HQ ALERT: A suspect with criminal/intelligence activity (" .. name .. ") has been detected!", COLOR_LIGHTRED, true)
                 end
