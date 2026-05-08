@@ -42,7 +42,7 @@ PERSISTENT_UI = PERSISTENT_UI or {
     cases_sort = 1,
     convicts_sort = 1,
     network_sort = 1,
-    intel_filter_level = 1,
+    intel_filter_level = 4,
     intel_sort = 1,
     search_text = {},
     active_tab = 1,
@@ -781,25 +781,42 @@ end
 -- ===========================
 -- Helper: Fog of War check
 -- ===========================
-function hasConfessedToIntrigue(hf_id)
-    if not df.global.world.status.interrogation_reports then return false end
+local GLOBAL_CONFESSED_CACHE = {}
+local GLOBAL_CONFESSED_CACHE_COUNT = -1
+
+local function updateConfessedCache()
+    if not df.global.world.status.interrogation_reports then return end
     local reports = df.global.world.status.interrogation_reports
-    for i = 0, #reports - 1 do
+    local num_reports = #reports
+    
+    if num_reports == GLOBAL_CONFESSED_CACHE_COUNT then return end
+    
+    GLOBAL_CONFESSED_CACHE = {}
+    GLOBAL_CONFESSED_CACHE_COUNT = num_reports
+    
+    for i = 0, num_reports - 1 do
         local report = reports[i]
-        if report and report.subject_hf == hf_id then
-            local ok, succ = pcall(function() return report.intcr.flags.successful end)
-            local has_reveals = false
-            pcall(function()
-                if #report.confessed_target_crime_id > 0 or #report.revealed_agreement_id > 0 then
-                    has_reveals = true
+        if report then
+            local hf_id = report.subject_hf
+            if hf_id >= 0 and not GLOBAL_CONFESSED_CACHE[hf_id] then
+                local ok, succ = pcall(function() return report.intcr.flags.successful end)
+                local has_reveals = false
+                pcall(function()
+                    if #report.confessed_target_crime_id > 0 or #report.revealed_agreement_id > 0 then
+                        has_reveals = true
+                    end
+                end)
+                if has_reveals then
+                    GLOBAL_CONFESSED_CACHE[hf_id] = true
                 end
-            end)
-            if (ok and succ) or has_reveals then
-                return true
             end
         end
     end
-    return false
+end
+
+function hasConfessedToIntrigue(hf_id)
+    updateConfessedCache()
+    return GLOBAL_CONFESSED_CACHE[hf_id] or false
 end
 
 -- ===========================
@@ -951,6 +968,38 @@ function IntelReportScreen:onInput(keys)
         return true
     end
     self.super.onInput(self, keys)
+end
+
+local function getUnitCategoryAndOrg(unit)
+    local category = 'citizen'
+    if dfhack.units.isCitizen(unit) then
+        category = 'citizen'
+    elseif dfhack.units.isResident(unit) then
+        category = 'resident'
+    else
+        -- It's a visitor. Is it local or foreign?
+        if unit.civ_id == df.global.plotinfo.civ_id then
+            category = 'visitor_local'
+        else
+            category = 'visitor_foreign'
+        end
+    end
+
+    -- Check criminal organization
+    local is_criminal_org = false
+    pcall(function()
+        local hf = df.historical_figure.find(unit.hist_figure_id)
+        if hf and hf.entity_links then
+            for _, link in ipairs(hf.entity_links) do
+                local ent = df.historical_entity.find(link.target)
+                if ent and ent.type == df.historical_entity_type.Outcast then
+                    is_criminal_org = true
+                    break
+                end
+            end
+        end
+    end)
+    return category, is_criminal_org
 end
 
 JusticeHQ = defclass(JusticeHQ, gui.ZScreen)
@@ -1588,38 +1637,6 @@ local function getArtifactDetails(plot_param, player_site)
         end
     end)
     return art_name, at_our_site
-end
-
-local function getUnitCategoryAndOrg(unit)
-    local category = 'citizen'
-    if dfhack.units.isCitizen(unit) then
-        category = 'citizen'
-    elseif dfhack.units.isResident(unit) then
-        category = 'resident'
-    else
-        -- It's a visitor. Is it local or foreign?
-        if unit.civ_id == df.global.ui.civ_id then
-            category = 'visitor_local'
-        else
-            category = 'visitor_foreign'
-        end
-    end
-
-    -- Check criminal organization
-    local is_criminal_org = false
-    pcall(function()
-        local hf = df.historical_figure.find(unit.hist_figure_id)
-        if hf and hf.entity_links then
-            for _, link in ipairs(hf.entity_links) do
-                local ent = df.historical_entity.find(link.target)
-                if ent and ent.type == df.historical_entity_type.Outcast then
-                    is_criminal_org = true
-                    break
-                end
-            end
-        end
-    end)
-    return category, is_criminal_org
 end
 
 function JusticeHQ:buildEvidence(s)
@@ -3765,7 +3782,6 @@ end
 
 function JusticeHQ:onSubmitNetwork(idx, choice)
     if not choice or not choice.data then
-        cihq_announce("CI-HQ: Select a specific person, not a header or plot row.", COLOR_YELLOW, false, true)
         return
     end
     self.selected_suspect = choice.data
@@ -5383,13 +5399,11 @@ function isSuspectStillThreat(uid)
     local cd = getUnitCrimeData(unit)
     local has_unsolved = cd.times_accused > cd.times_convicted
     
-    -- Only fully resolved if all crimes convicted AND no active intrigue plots remain.
-    -- A mastermind with a convicted theft but 3 active assassination plots is still a threat.
-    if cd.times_accused > 0 and not has_unsolved and not has_intrigue_threat then
-        return false  -- All crimes resolved and no intrigue threat
+    if has_unsolved or has_intrigue_threat then
+        return true
     end
     
-    return has_intrigue_threat
+    return false
 end
 
 function dispatchGuardToSuspect(uid)
@@ -5456,16 +5470,7 @@ function interrogationMonitorTick()
                     cihq_announce("CI-HQ: " .. watch.name .. " " .. reason .. " Interrogation aborted.", COLOR_RED, true)
                     persist_state()
                 else
-                    -- Check if suspect confessed (alive)
-                    if not isSuspectStillThreat(uid) then
-                        watch.status = 'confessed'
-                        cihq_announce(
-                            "CI-HQ: " .. watch.name .. " has confessed! Intelligence extracted.", COLOR_LIGHTGREEN, true)
-                        CRIME_CACHE = nil
-                        INTERROGATION_HISTORY_CACHE = nil
-                        persist_state()
-                    else
-                        any_active = true
+                    any_active = true
                         
                         -- Check if Captain is currently interrogating
                         local guard = findCaptainOfGuard()
@@ -5577,7 +5582,6 @@ function interrogationMonitorTick()
                     end
                 end
             end
-        end
         
         -- Execution Monitor Logic
         local any_exec_active = false
@@ -5672,7 +5676,6 @@ JusticeHQOverlay.ATTRS = {
 }
 
 function JusticeHQOverlay:init()
-    JusticeHQOverlay.super.init(self)
     self:addviews{
         widgets.HotkeyLabel{
             frame={t=0, l=0},
@@ -5682,6 +5685,17 @@ function JusticeHQOverlay:init()
             text_pen=COLOR_LIGHTGREEN,
         }
     }
+end
+
+function JusticeHQOverlay:onInput(keys)
+    if JusticeHQOverlay.super.onInput(self, keys) then
+        return true
+    end
+    -- Consume mouse clicks within our frame to prevent passthrough
+    if keys._MOUSE_L or keys._MOUSE_R then
+        if self:getMouseFramePos() then return true end
+    end
+    return false
 end
 
 --
