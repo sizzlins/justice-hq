@@ -6,6 +6,15 @@ if not df.global.plotinfo or not df.global.plotinfo.punishments then
     qerror('CI-HQ requires Dwarf Fortress v50+ with DFHack. Unsupported version detected.')
 end
 
+-- Embedded version tracking (must match info.txt NUMERIC_VERSION)
+-- If a user reports a bug, check this number against the latest release.
+CIHQ_VERSION = 32
+CIHQ_DISPLAY_VERSION = '1.2.6'
+CIHQ_SHOW_VERSION = false
+-- CIHQ_SHOW_VERSION = true
+-- false → Title shows: "Counter-Intelligence HQ"
+-- true → Title shows: "Counter-Intelligence HQ v1.2.6"
+
 --[====[
 gui/justice-hq
 ==============
@@ -827,6 +836,7 @@ function getHfIntrigueData(hf, opt_no_armok_active)
     local data = {
         has_intrigues = false,
         plot_count = 0,
+        counterintel_count = 0, -- Defensive counter-spy plots (not villain activity)
         actor_count = 0,
         plots = {},        -- list of {type, on_hold, actor_count}
         actors = {},       -- list of {hf_id, role, strategy}
@@ -875,7 +885,13 @@ function getHfIntrigueData(hf, opt_no_armok_active)
                     agreement = plot.agreement or -1,
                     parent_plot = plot.parent_plot or -1,
                 })
-                data.plot_count = data.plot_count + 1
+                -- Counterintelligence is a defensive plot (counter-spy ops defending your civ)
+                -- Don't count it as villain activity
+                if plot_type_name == "Counterintelligence" then
+                    data.counterintel_count = data.counterintel_count + 1
+                else
+                    data.plot_count = data.plot_count + 1
+                end
             end
         end
     end
@@ -1014,7 +1030,7 @@ function JusticeHQ:init()
     self.filter_level = PERSISTENT_UI.filter_level or 1
     self.case_filter_level = PERSISTENT_UI.case_filter_level or 1
     self.convict_filter_level = PERSISTENT_UI.convict_filter_level or 1
-    self.suspects = self:gatherSuspects()
+    self.suspects = self:gatherSuspects(self.filter_level == 6)
     self.selected_suspect = nil
     self.init_complete = false
     
@@ -1064,7 +1080,7 @@ function JusticeHQ:init()
     self:addviews{
         widgets.Window{
             frame = {w = 90, h = 45},
-            frame_title = 'Counter-Intelligence HQ',
+            frame_title = CIHQ_SHOW_VERSION and ('Counter-Intelligence HQ  v' .. CIHQ_DISPLAY_VERSION) or 'Counter-Intelligence HQ',
             resizable = true,
             subviews = {
                 -- Tab Bar
@@ -1227,6 +1243,7 @@ function JusticeHQ:init()
                                 {label = 'All + Detained', value = 3, pen = COLOR_CYAN},
                                 {label = 'Everyone', value = 4, pen = COLOR_GREEN},
                                 {label = 'Convictable', value = 5, pen = COLOR_LIGHTMAGENTA},
+                                {label = 'All Citizens', value = 6, pen = COLOR_WHITE},
                             },
                             initial_option = PERSISTENT_UI.filter_level or 1,
                             on_change = self:callback('onFilterChange'),
@@ -2027,6 +2044,7 @@ function JusticeHQ:buildChoices()
         if self.filter_level == 3 and (s.threat == 'High' or s.threat == 'Medium') then show = true end
         if self.filter_level == 4 then show = true end
         if self.filter_level == 5 and isConvictable(s) then show = true end
+        if self.filter_level == 6 then show = true end
 
         if show then
             rank = rank + 1
@@ -2128,12 +2146,19 @@ function JusticeHQ:buildChoices()
 end
 
 function JusticeHQ:onFilterChange(new_val)
+    local old_filter = self.filter_level
     if self.subviews.filter_cycle then
         PERSISTENT_UI.filter_level = self.subviews.filter_cycle:getOptionValue()
         self.filter_level = PERSISTENT_UI.filter_level
     end
     if self.subviews.suspect_sort then
         PERSISTENT_UI.suspect_sort = self.subviews.suspect_sort:getOptionValue()
+    end
+    -- Re-gather suspects when switching to/from 'All Citizens' since
+    -- gatherSuspects normally only includes units with crime/intrigue data
+    if (self.filter_level == 6) ~= (old_filter == 6) then
+        self.suspects = self:gatherSuspects(self.filter_level == 6)
+        self:invalidateEvidenceCache()
     end
     local list = self.subviews.suspect_list
     list:setChoices(self:buildChoices())
@@ -4217,7 +4242,7 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
     self.subviews.pages:setSelected(6)
 end
 
-function JusticeHQ:gatherSuspects()
+function JusticeHQ:gatherSuspects(include_all_citizens)
     initCrimeCache() -- Rebuild cache to avoid O(N*M) lag
     local suspects = {}
     
@@ -4247,6 +4272,11 @@ function JusticeHQ:gatherSuspects()
             -- Check crime records
             local unit_crimes = getUnitCrimeData(unit)
             if unit_crimes.times_accused > 0 then
+                is_suspect = true
+            end
+            
+            -- 'All Citizens' filter: include everyone regardless of crime/intrigue
+            if include_all_citizens then
                 is_suspect = true
             end
             
@@ -5415,7 +5445,7 @@ function dispatchGuardToSuspect(uid)
     
     if guard.id == uid then return false end
     
-    -- Check if guard is already interrogating THIS suspect
+    -- Check if guard is already interrogating someone - don't interrupt
     if guard.job.current_job then
         if guard.job.current_job.job_type == df.job_type.InterrogateSubject then
             -- Already interrogating someone - don't interrupt
@@ -5810,6 +5840,9 @@ OVERLAY_WIDGETS = {
     realistic_arrests = RealisticArrestsToggleOverlay,
     villain_entry_alerts = VillainEntryAlertsToggleOverlay,
 }
+
+-- Print version on script load so it appears in stderr.log for diagnostics
+print('CI-HQ v' .. CIHQ_DISPLAY_VERSION .. ' (build ' .. CIHQ_VERSION .. ') loaded.')
 
 local function isRealisticArrestsEnabled()
     local ok, plugins_overlay = pcall(require, 'plugins.overlay')
