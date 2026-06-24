@@ -65,8 +65,6 @@ local STATE = {
     settings = { show_toast = true }
 }
 
-_G.DWARFTIFY_PROBE_QUEUE = function() return STATE.queue, STATE.repeat_mode end
-
 local function loadConfig()
     if dfhack.filesystem.isfile(CONFIG_FILE) then
         pcall(function()
@@ -313,7 +311,6 @@ local function setGameTrack(id)
         -- Tell the engine to instantly kill whatever is currently playing (songs or interlude cards).
         -- This natively triggers FMOD's hardcoded 3-second fade-out.
         m.next_play_duration = 0
-        if m._fields.card_duration then m.card_duration = 0 end
         
         -- We must wait for FMOD to finish its 3-second fade-out.
         -- If we try to force a track instantly during the fade, FMOD will crash,
@@ -1141,8 +1138,6 @@ function Dwarftify:onInput(keys)
 end
 
 if not dfhack_flags.module then
-    local dwarftify = reqscript('gui/dwarftify')
-    local screen = dwarftify.Dwarftify{}
+    local screen = Dwarftify{}
     screen:show()
-    return
 end

@@ -58,7 +58,6 @@ end
 
 local cid = -100
 local synced = 0
-local skipped = 0
 local raw_entries = {}
 
 -- Clear old sounds to prevent buildup
@@ -73,12 +72,11 @@ for _, entry in ipairs(files) do
             -- Validate the ogg file before processing
             if not is_valid_ogg(entry.path) then
                 dfhack.printerr('Dwarftify: Skipping invalid ogg: ' .. filename .. ' (not a valid OGG file)')
-                skipped = skipped + 1
             else
                 local base_name = filename:match('^(.+)%.ogg$') or filename
-                -- Truncate base_name heavily (10 chars) to prevent DF raw parser buffer overflow
+                -- Truncate base_name to 60 chars (well within DF raw limits)
                 local safe_name = base_name:lower():gsub('[^%w_]', '_')
-                if #safe_name > 10 then safe_name = safe_name:sub(1, 10) end
+                if #safe_name > 60 then safe_name = safe_name:sub(1, 60) end
                 
                 -- Hash based on the full name to ensure uniqueness despite truncation
                 local hash = 0
@@ -124,37 +122,24 @@ for _, entry in ipairs(files) do
     end
 end
 
--- Generate MUSIC_FILE mapping for the sound directory
+-- Generate MUSIC_FILE and RAW files for future worlds
 if #raw_entries > 0 then
     local mapping_path = sound_dir .. '/music_file_dwarftify.txt'
     local mf = io.open(mapping_path, 'w')
     if mf then
-        mf:write('music_file_dwarftify\n\n')
-        mf:write('[OBJECT:MUSIC_FILE]\n\n')
+        mf:write('music_file_dwarftify\n\n[OBJECT:MUSIC_FILE]\n\n')
         for _, e in ipairs(raw_entries) do
-            mf:write('[MUSIC_FILE:' .. e.track_id .. ']\n')
-            mf:write('    [FILE:' .. e.filename .. ']\n')
-            mf:write('    [TITLE:' .. e.title .. ']\n')
-            mf:write('    [AUTHOR:Custom Music]\n\n')
+            mf:write('[MUSIC_FILE:' .. e.track_id .. ']\n    [FILE:' .. e.filename .. ']\n    [TITLE:' .. e.title .. ']\n    [AUTHOR:Custom Music]\n\n')
         end
         mf:close()
     end
-end
 
--- Generate RAW file for future worlds
-if #raw_entries > 0 then
     local raw_path = raw_dir .. '/music_dwarftify_custom.txt'
     local f = io.open(raw_path, 'w')
     if f then
-        f:write('music_dwarftify_custom\n')
-        f:write('\n')
-        f:write('[OBJECT:MUSIC]\n')
-        f:write('\n')
+        f:write('music_dwarftify_custom\n\n[OBJECT:MUSIC]\n\n')
         for _, e in ipairs(raw_entries) do
-            f:write('[MUSIC:' .. e.track_id .. ']\n')
-            f:write('\t[FILE:' .. e.track_id .. ']\n')
-            f:write('\t[CONTEXT:ANY]\n')
-            f:write('\n')
+            f:write('[MUSIC:' .. e.track_id .. ']\n\t[FILE:' .. e.track_id .. ']\n\t[CONTEXT:ANY]\n\n')
         end
         f:close()
     end
