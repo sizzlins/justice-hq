@@ -142,19 +142,6 @@ function isEnabled()
     return enabled
 end
 
-local function persist_state()
-    dfhack.persistent.saveSiteData(GLOBAL_KEY, { enabled = enabled })
-end
-
-local function load_state()
-    local persisted_data = dfhack.persistent.getSiteData(GLOBAL_KEY, {})
-    if persisted_data.enabled == nil then
-        enabled = true
-    else
-        enabled = persisted_data.enabled
-    end
-end
-
 local function process_mandates(dry_run, list_only, quiet)
     local mandates = df.global.world.mandates.all
     local make_mandates = {}
@@ -315,19 +302,6 @@ local function event_loop()
     repeatutil.scheduleUnlessAlreadyScheduled(GLOBAL_KEY, 1, 'days', event_loop)
 end
 
-dfhack.onStateChange[GLOBAL_KEY] = function(sc)
-    if sc == SC_MAP_UNLOADED then
-        enabled = false
-        return
-    end
-    if sc ~= SC_MAP_LOADED or df.global.gamemode ~= df.game_mode.DWARF then
-        return
-    end
-
-    load_state()
-    event_loop()
-end
-
 -- ============================================================
 -- Overlay Widget (for DFHack Control Panel integration)
 -- ============================================================
@@ -374,15 +348,12 @@ local positionals = argparse.processArgsGetopt(args, {
     { 'l', 'list', handler = function() list_only = true end },
 })
 
-load_state()
-
 if positionals[1] == 'enable' then
     local has_overlay, overlay = pcall(require, 'plugins.overlay')
     if has_overlay and overlay and overlay.overlay_command then
         overlay.overlay_command({'enable', 'mandate-fulfill.daemon'})
     end
     enabled = true
-    persist_state()
     event_loop()
     print_status()
 elseif positionals[1] == 'disable' then
@@ -391,7 +362,6 @@ elseif positionals[1] == 'disable' then
         overlay.overlay_command({'disable', 'mandate-fulfill.daemon'})
     end
     enabled = false
-    persist_state()
     repeatutil.cancel(GLOBAL_KEY)
     print_status()
 elseif positionals[1] == 'status' then
