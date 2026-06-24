@@ -25,6 +25,24 @@ local FLAG_NAMES = {
     'UNIT_COMBAT_REPORT', 'UNIT_COMBAT_REPORT_ALL_ACTIVE', 'ALERT'
 }
 
+local ADV_SAVE_PATH = 'dfhack-config/announce-settings-adv.json'
+local auto_dismiss_wait = true
+
+local function load_adv_settings()
+    local data = json.decode_file(ADV_SAVE_PATH)
+    if type(data) == 'table' then
+        if data.auto_dismiss_wait ~= nil then
+            auto_dismiss_wait = data.auto_dismiss_wait
+        end
+    end
+end
+
+local function save_adv_settings()
+    pcall(function() json.encode_file({auto_dismiss_wait = auto_dismiss_wait}, ADV_SAVE_PATH) end)
+end
+
+load_adv_settings()
+
 -- ===========================
 -- Core Logic
 -- ===========================
@@ -56,28 +74,23 @@ end
 
 local function save_announcements()
     local data = serialize_announcements()
-    local f = io.open(SAVE_PATH, 'w')
-    if f then
-        f:write(json.encode(data))
-        f:close()
-        print('Announce-Settings: Saved ' .. tostring(#(table.pack(pairs(data)))) .. ' announcement configs to ' .. SAVE_PATH)
+    local ok = pcall(function() json.encode_file(data, SAVE_PATH) end)
+    if ok then
+        print('Announce-Settings: Saved announcement configs to ' .. SAVE_PATH)
         dfhack.gui.showAnnouncement('Announcement settings saved!', COLOR_GREEN)
     else
-        dfhack.printerr('Announce-Settings: Failed to open ' .. SAVE_PATH .. ' for writing.')
+        dfhack.printerr('Announce-Settings: Failed to save ' .. SAVE_PATH)
     end
 end
 
 local function load_announcements()
-    local f = io.open(SAVE_PATH, 'r')
-    if not f then
+    if not dfhack.filesystem.isfile(SAVE_PATH) then
         dfhack.gui.showAnnouncement('No saved announcement settings found.', COLOR_YELLOW)
         return
     end
-    local text = f:read('*a')
-    f:close()
     
-    local ok, data = pcall(json.decode, text)
-    if not ok or type(data) ~= 'table' then
+    local data = json.decode_file(SAVE_PATH)
+    if type(data) ~= 'table' then
         dfhack.printerr('Announce-Settings: Failed to parse ' .. SAVE_PATH)
         return
     end
@@ -150,17 +163,9 @@ end
 
 local function reset_announcements()
     local DEFAULTS_PATH = 'dfhack-config/announce-defaults.json'
-    local f = io.open(DEFAULTS_PATH, 'r')
-    if not f then
-        dfhack.gui.showAnnouncement('No defaults snapshot found! Cannot reset.', COLOR_LIGHTRED)
-        return
-    end
-    local text = f:read('*a')
-    f:close()
-    
-    local ok, data = pcall(json.decode, text)
-    if not ok or type(data) ~= 'table' then
-        dfhack.printerr('Announce-Settings: Failed to parse defaults file.')
+    local data = json.decode_file(DEFAULTS_PATH)
+    if type(data) ~= 'table' then
+        dfhack.gui.showAnnouncement('No defaults snapshot found or failed to parse.', COLOR_LIGHTRED)
         return
     end
     
@@ -201,18 +206,11 @@ end
 -- On first load, snapshot the current (vanilla) state as the defaults
 local function snapshot_defaults_if_needed()
     local DEFAULTS_PATH = 'dfhack-config/announce-defaults.json'
-    local f = io.open(DEFAULTS_PATH, 'r')
-    if f then
-        f:close()
-        return
-    end
+    if dfhack.filesystem.isfile(DEFAULTS_PATH) then return end
+    
     local data = serialize_announcements()
-    f = io.open(DEFAULTS_PATH, 'w')
-    if f then
-        f:write(json.encode(data))
-        f:close()
-        print('Announce-Settings: Vanilla defaults snapshot saved to ' .. DEFAULTS_PATH)
-    end
+    pcall(function() json.encode_file(data, DEFAULTS_PATH) end)
+    print('Announce-Settings: Vanilla defaults snapshot saved to ' .. DEFAULTS_PATH)
 end
 
 snapshot_defaults_if_needed()
@@ -226,7 +224,7 @@ AnnounceSettingsProfileOverlay.ATTRS = {
     desc = 'Global profile controls for Announcements (Save/Load/Disable All/Reset).',
     default_pos = {x = 23, y = -6},
     default_enabled = true,
-    viewscreens = 'dwarfmode/Settings/ANNOUNCEMENTS',
+    viewscreens = {'dwarfmode/Settings/ANNOUNCEMENTS', 'dungeonmode/Settings/ANNOUNCEMENTS'},
     frame = {w = 23, h = 7},
 }
 
@@ -276,7 +274,7 @@ AnnounceSettingsMessageOverlay.ATTRS = {
     desc = 'Helpful message explaining Terrarium mode requirements.',
     default_pos = {x = 48, y = -6},
     default_enabled = true,
-    viewscreens = 'dwarfmode/Settings/ANNOUNCEMENTS',
+    viewscreens = {'dwarfmode/Settings/ANNOUNCEMENTS', 'dungeonmode/Settings/ANNOUNCEMENTS'},
     frame = {w = 50, h = 6},
 }
 
@@ -327,7 +325,7 @@ AnnounceSettingsTargetOverlay.ATTRS = {
     desc = 'Category target selector for Announcement settings.',
     default_pos = {x = 135, y = 10},
     default_enabled = true,
-    viewscreens = 'dwarfmode/Settings/ANNOUNCEMENTS',
+    viewscreens = {'dwarfmode/Settings/ANNOUNCEMENTS', 'dungeonmode/Settings/ANNOUNCEMENTS'},
     frame = {w = 24, h = 3},
 }
 
@@ -362,8 +360,8 @@ AnnounceSettingsTogglesOverlay.ATTRS = {
     desc = 'Column toggle buttons for Announcement settings.',
     default_pos = {x = 135, y = 14},
     default_enabled = true,
-    viewscreens = 'dwarfmode/Settings/ANNOUNCEMENTS',
-    frame = {w = 24, h = 10},
+    viewscreens = {'dwarfmode/Settings/ANNOUNCEMENTS', 'dungeonmode/Settings/ANNOUNCEMENTS'},
+    frame = {w = 24, h = 14},
 }
 
 function AnnounceSettingsTogglesOverlay:init()
@@ -429,9 +427,46 @@ function AnnounceSettingsTogglesOverlay:init()
                     text_pen = COLOR_GRAY,
                     on_activate = function() toggle_column('ALERT') end,
                 },
+                widgets.HotkeyLabel{
+                    frame = {t = 10, l = 1},
+                    key = 'CUSTOM_ALT_9',
+                    label = 'Toggle Wait Bypass',
+                    text_pen = function() return auto_dismiss_wait and COLOR_LIGHTGREEN or COLOR_LIGHTRED end,
+                    on_activate = function()
+                        auto_dismiss_wait = not auto_dismiss_wait
+                        save_adv_settings()
+                        local status = auto_dismiss_wait and 'ENABLED' or 'DISABLED'
+                        dfhack.gui.showAnnouncement('Adventure wait bypass ' .. status, auto_dismiss_wait and COLOR_LIGHTGREEN or COLOR_LIGHTRED)
+                    end,
+                    visible = function() return df.global.gametype == df.game_type.ADVENTURE_MAIN end,
+                },
             }
         }
     }
+end
+
+AnnounceSettingsAdventureWaitHider = defclass(AnnounceSettingsAdventureWaitHider, overlay.OverlayWidget)
+AnnounceSettingsAdventureWaitHider.ATTRS = {
+    desc = 'Auto-dismisses the "You haven\'t been able to act" popup in Adventure Mode.',
+    default_pos = {x = 0, y = 0},
+    default_enabled = true,
+    viewscreens = 'dungeonmode',
+    frame = {w = 1, h = 1},
+    frame_background = gui.CLEAR_PEN,
+}
+
+
+
+function AnnounceSettingsAdventureWaitHider:onRenderFrame()
+    if not auto_dismiss_wait then return end
+    
+    local adv = df.global.adventure
+    if not adv then return end
+    
+    -- Official clean fix from Putnam (DF Developer):
+    -- Setting this to -1 prevents the engine from ever triggering the 
+    -- "You haven't been able to act" popup in the first place!
+    adv.last_took_input_year = -1
 end
 
 OVERLAY_WIDGETS = {
@@ -439,6 +474,7 @@ OVERLAY_WIDGETS = {
     message = AnnounceSettingsMessageOverlay,
     target = AnnounceSettingsTargetOverlay,
     toggles = AnnounceSettingsTogglesOverlay,
+    adv_hider = AnnounceSettingsAdventureWaitHider,
 }
 
 if dfhack_flags.module then

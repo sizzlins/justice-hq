@@ -29,6 +29,13 @@ local function is_valid_ogg(path)
     local header = f:read(4)
     local size = f:seek('end')
     f:close()
+    
+    -- Limit to ~15MB to prevent memory leak crashes in the DF engine
+    if size > 15728640 then
+        dfhack.printerr('Dwarftify: Skipping file (exceeds 15MB limit): ' .. path)
+        return false
+    end
+    
     return header == 'OggS' and size > 1000
 end
 
@@ -37,18 +44,9 @@ dfhack.filesystem.mkdir_recursive(mod_dir)
 dfhack.filesystem.mkdir_recursive(sound_dir)
 dfhack.filesystem.mkdir_recursive(raw_dir)
 
-local version = 1
-local old_info = io.open(mod_dir .. '/info.txt', 'r')
-if old_info then
-    local content = old_info:read('*a')
-    local old_ver = content:match('%[NUMERIC_VERSION:(%d+)%]')
-    if old_ver then version = tonumber(old_ver) + 1 end
-    old_info:close()
-end
-
 local info = io.open(mod_dir .. '/info.txt', 'w')
 if info then
-    info:write('[ID:dwarftify]\n[NUMERIC_VERSION:' .. version .. ']\n[DISPLAYED_VERSION:' .. version .. ']\n[EARLIEST_COMPATIBLE_NUMERIC_VERSION:1]\n[EARLIEST_COMPATIBLE_DISPLAYED_VERSION:1.0]\n[AUTHOR:Dwarftify]\n[NAME:Dwarftify Custom Music]\n[DESCRIPTION:Custom music tracks synced by Dwarftify.]\n')
+    info:write('[ID:dwarftify]\n[NUMERIC_VERSION:1]\n[DISPLAYED_VERSION:1.0]\n[EARLIEST_COMPATIBLE_NUMERIC_VERSION:1]\n[EARLIEST_COMPATIBLE_DISPLAYED_VERSION:1.0]\n[AUTHOR:Dwarftify]\n[NAME:Dwarftify Custom Music]\n[DESCRIPTION:Custom music tracks synced by Dwarftify.]\n')
     info:close()
 end
 

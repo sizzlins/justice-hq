@@ -33,7 +33,6 @@ Usage
 local gui = require('gui')
 local widgets = require('gui.widgets')
 local dialogs = require('gui.dialogs')
-local utils = require('utils')
 
 -- Persistent watchlist: tracks suspects under relentless interrogation
 -- Key = unit.id, Value = {name, retries, max_retries, status, unit_id, hf_id}
@@ -1031,6 +1030,16 @@ local function getUnitCategoryAndOrg(unit)
     return category, is_criminal_org
 end
 
+local function wrapInCard(text_arr, width, color)
+    local new_arr = {}
+    for _, token in ipairs(text_arr) do
+        table.insert(new_arr, token)
+    end
+    table.insert(new_arr, {text = string.rep(string.char(196), width), pen = COLOR_DARKGREY})
+    table.insert(new_arr, NEWLINE)
+    return new_arr
+end
+
 JusticeHQ = defclass(JusticeHQ, gui.ZScreen)
 JusticeHQ.ATTRS = {
     focus_path = 'justice-hq',
@@ -1092,7 +1101,7 @@ function JusticeHQ:init()
 
     self:addviews{
         widgets.Window{
-            frame = {w = 90, h = 45},
+            frame = {w = 110, h = 50},
             frame_title = CIHQ_SHOW_VERSION and ('Counter-Intelligence HQ  v' .. CIHQ_DISPLAY_VERSION) or 'Counter-Intelligence HQ',
             resizable = true,
             subviews = {
@@ -1124,7 +1133,7 @@ function JusticeHQ:init()
                                 widgets.FilteredList{
                                     view_id = 'suspect_list',
                                     frame = {t = 0, l = 0, r = 0, b = 0},
-                                    row_height = 4,
+                                    row_height = 6,
                                     choices = self:buildChoices(),
                                     edit_on_change = function(text) PERSISTENT_UI.search_text[1] = text end,
                                     on_select = self:callback('onSelectSuspect'),
@@ -1145,7 +1154,7 @@ function JusticeHQ:init()
                                 widgets.FilteredList{
                                     view_id = 'cases_list',
                                     frame = {t = 1, l = 0, r = 0, b = 0},
-                                    row_height = 3,
+                                    row_height = 5,
                                     choices = self:buildCaseChoices(),
                                     edit_on_change = function(text) PERSISTENT_UI.search_text[2] = text end,
                                     on_select = self:callback('onSelectCase'),
@@ -1162,7 +1171,7 @@ function JusticeHQ:init()
                                 widgets.FilteredList{
                                     view_id = 'warrants_list',
                                     frame = {t = 0, l = 0, r = 0, b = 0},
-                                    row_height = 2,
+                                    row_height = 4,
                                     choices = self:buildWarrantsChoices(),
                                     edit_on_change = function(text) PERSISTENT_UI.search_text[3] = text end,
                                     on_select = self:callback('onSelectWarrant'),
@@ -1179,7 +1188,7 @@ function JusticeHQ:init()
                                 widgets.FilteredList{
                                     view_id = 'convicts_list',
                                     frame = {t = 0, l = 0, r = 0, b = 0},
-                                    row_height = 2,
+                                    row_height = 4,
                                     choices = self:buildConvictChoices(),
                                     edit_on_change = function(text) PERSISTENT_UI.search_text[4] = text end,
                                     on_select = self:callback('onSelectConvict'),
@@ -1230,7 +1239,7 @@ function JusticeHQ:init()
                                 widgets.FilteredList{
                                     view_id = 'intel_list',
                                     frame = {t = 0, l = 0, r = 0, b = 0},
-                                    row_height = 4,
+                                    row_height = 6,
                                     choices = {},
                                     edit_on_change = function(text) PERSISTENT_UI.search_text[7] = text end,
                                     on_submit = self:callback('onSubmitIntelReport'),
@@ -1566,6 +1575,15 @@ end
 -- Evidence Scoring
 -- ===========================
 
+local function getCategoryBadge(category)
+    local badge = string.upper(category or "")
+    local color = COLOR_DARKGREY
+    if category == 'visitor_foreign' then color = COLOR_LIGHTCYAN
+    elseif category == 'visitor_local' then color = COLOR_CYAN
+    elseif category == 'resident' then color = COLOR_CYAN end
+    return badge, color
+end
+
 function getCrimeName(mode)
     -- Try the enum first (most accurate)
     local raw = df.crime_type and df.crime_type[mode]
@@ -1875,7 +1893,7 @@ function JusticeHQ:buildEvidence(s)
         score = score + pts
         table.insert(evidence, {
             text = "Non-citizen: Foreign Visitor",
-            detail = "Foreign nationals cannot be imprisoned (jail sentences ignored), but may be beaten or hammered.",
+            detail = "Visitor from an outside civilization.",
             pts = pts, color = COLOR_LIGHTCYAN,
         })
     elseif s.category == 'visitor_local' then
@@ -1883,7 +1901,7 @@ function JusticeHQ:buildEvidence(s)
         score = score + pts
         table.insert(evidence, {
             text = "Non-citizen: Local Visitor",
-            detail = "Visitor from your civilization. Cannot be imprisoned, but may be beaten or hammered.",
+            detail = "Visitor from your own civilization.",
             pts = pts, color = COLOR_CYAN,
         })
     elseif s.category == 'resident' then
@@ -2076,11 +2094,7 @@ function JusticeHQ:buildChoices()
             if s.threat == 'High' then threat_color = COLOR_LIGHTRED
             elseif s.threat == 'Medium' then threat_color = COLOR_YELLOW end
             
-            local cat_badge = string.upper(s.category)
-            local badge_color = COLOR_DARKGREY
-            if s.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
-            elseif s.category == 'visitor_local' then badge_color = COLOR_CYAN
-            elseif s.category == 'resident' then badge_color = COLOR_CYAN end
+            local cat_badge, badge_color = getCategoryBadge(s.category)
             
             -- Network info
             local hf = df.historical_figure.find(s.unit.hist_figure_id)
@@ -2149,10 +2163,9 @@ function JusticeHQ:buildChoices()
             table.insert(text_arr, {text = string.format("   %-35s", crimes_summary), pen = COLOR_GREY})
             table.insert(text_arr, {text = top_strategy ~= "" and top_strategy or "", pen = STRATEGY_COLORS[top_strategy and top_strategy:gsub(" ", "_") or ""] or COLOR_YELLOW})
             table.insert(text_arr, {text = cell_str ~= "" and ("  " .. cell_str) or "", pen = COLOR_CYAN})
-            table.insert(text_arr, NEWLINE) -- extra space between items
             local searchable = string.lower(s.name .. " " .. s.prof .. " " .. crimes_summary)
             table.insert(list_choices, {
-                text = text_arr,
+                text = wrapInCard(text_arr, 104, COLOR_DARKGREY),
                 search_key = searchable,
                 data = s,
             })
@@ -2218,9 +2231,6 @@ function JusticeHQ:onConvictsFilterChange(new_val)
     end
 end
 
-function JusticeHQ:onSearchChange(text)
-    -- Remove manual search logic; FilteredList handles it natively.
-end
 
 function JusticeHQ:setListChoices(list_view, choices, id_func)
     local selected_idx = 1
@@ -2601,11 +2611,9 @@ function JusticeHQ:buildIntelChoices()
         else
             table.insert(text_arr, {text = 'No new information', pen = COLOR_DARKGREY})
         end
-        table.insert(text_arr, NEWLINE)
-
         local searchable = string.lower(e.subject_name .. ' ' .. e.subject_occ .. ' ' .. e.officer_str .. ' ' .. e.outcome_label)
         table.insert(list_choices, {
-            text = text_arr,
+            text = wrapInCard(text_arr, 104, COLOR_DARKGREY),
             search_key = searchable,
             data = e,
         })
@@ -2626,31 +2634,7 @@ function JusticeHQ:buildIntelChoices()
     return list_choices
 end
 
-local function wordWrap(text, max_width)
-    local lines = {}
-    for line in text:gmatch("([^\n]*)\n?") do
-        if line == "" then
-            table.insert(lines, "")
-        else
-            local indent = line:match("^(%s*)")
-            local current_line = ""
-            for word in line:gmatch("%S+") do
-                if #current_line == 0 then
-                    current_line = indent .. word
-                elseif #current_line + 1 + #word > max_width then
-                    table.insert(lines, current_line)
-                    current_line = indent .. word
-                else
-                    current_line = current_line .. " " .. word
-                end
-            end
-            if #current_line > 0 then
-                table.insert(lines, current_line)
-            end
-        end
-    end
-    return lines
-end
+
 
 function JusticeHQ:onSubmitIntelReport(idx, choice)
     if not choice or not choice.data then return end
@@ -2694,9 +2678,7 @@ function JusticeHQ:onSubmitIntelReport(idx, choice)
         end
     end
 
-    local full_text = table.concat(detail_lines, '\n')
-    local wrapped_lines = wordWrap(full_text, 75)
-    local wrapped_text = table.concat(wrapped_lines, '\n')
+    local wrapped_text = table.concat(detail_lines, '\n')
 
     -- Mark as read
     report.flags.viewed = true
@@ -2739,11 +2721,7 @@ function JusticeHQ:buildWarrantsChoices()
         if s.threat == 'High' then threat_color = COLOR_LIGHTRED
         elseif s.threat == 'Medium' then threat_color = COLOR_YELLOW end
         
-        local cat_badge = string.upper(s.category)
-        local badge_color = COLOR_DARKGREY
-        if s.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
-        elseif s.category == 'visitor_local' then badge_color = COLOR_CYAN
-        elseif s.category == 'resident' then badge_color = COLOR_CYAN end
+        local cat_badge, badge_color = getCategoryBadge(s.category)
 
         local open_crimes = getOpenCrimes(s.unit.hist_figure_id)
         local crime_names = {}
@@ -2771,7 +2749,7 @@ function JusticeHQ:buildWarrantsChoices()
         }
 
         table.insert(list_choices, {
-            text = text_blocks,
+            text = wrapInCard(text_blocks, 104, COLOR_DARKGREY),
             search_key = s.name:lower() .. ' ' .. s.prof:lower() .. ' ' .. s.category:lower(),
             data = s,
         })
@@ -2859,7 +2837,6 @@ function JusticeHQ:buildCaseChoices()
             table.insert(text_arr, {text = accused_name, pen = COLOR_YELLOW})
             table.insert(text_arr, {text = victim_name ~= "Unknown" and ("   Victim: ") or "", pen = COLOR_DARKGREY})
             table.insert(text_arr, {text = victim_name ~= "Unknown" and victim_name or "", pen = COLOR_LIGHTCYAN})
-            table.insert(text_arr, NEWLINE) -- extra space between items
             local searchable = string.lower(crime_name .. " " .. accused_name .. " " .. victim_name)
             
             table.insert(cases_data, {
@@ -2867,7 +2844,7 @@ function JusticeHQ:buildCaseChoices()
                 crime_name = crime_name,
                 accused_name = accused_name,
                 victim_name = victim_name,
-                display_arr = text_arr,
+                display_arr = wrapInCard(text_arr, 104, COLOR_DARKGREY),
                 searchable = searchable,
             })
         end
@@ -2997,11 +2974,7 @@ function JusticeHQ:buildConvictChoices()
                     crime_data = getUnitCrimeData(unit)
                 }
                 
-                local cat_badge = string.upper(suspect_data.category)
-                local badge_color = COLOR_DARKGREY
-                if suspect_data.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
-                elseif suspect_data.category == 'visitor_local' then badge_color = COLOR_CYAN
-                elseif suspect_data.category == 'resident' then badge_color = COLOR_CYAN end
+                local cat_badge, badge_color = getCategoryBadge(suspect_data.category)
                 
                 local text_arr = {
                     {text = string.format(" %-40s", name), pen = COLOR_WHITE},
@@ -3035,7 +3008,7 @@ function JusticeHQ:buildConvictChoices()
                 local searchable = string.lower(name .. " " .. suspect_data.prof)
 
                 table.insert(convicts_data, {
-                    display_arr = text_arr,
+                    display_arr = wrapInCard(text_arr, 104, COLOR_DARKGREY),
                     searchable = searchable,
                     suspect_data = suspect_data,
                     raw_punishment = p_data.raw,
@@ -3092,7 +3065,7 @@ function JusticeHQ:calculatePOI()
     
     -- Phase 1: Score all active suspects
     local guard = findCaptainOfGuard and findCaptainOfGuard()
-    local sheriff = findSheriff and findSheriff() or (findHammerer and findHammerer())
+    local sheriff = findHammerer and findHammerer()
     local poi_scores = {}  -- suspect -> adjusted score
     for _, s in ipairs(self.suspects) do
         if dfhack.units.isDead(s.unit) then goto skip_poi end
@@ -3270,11 +3243,7 @@ function JusticeHQ:buildPOICard(poi, total_pois)
     end
     
     -- Category badge
-    local cat_badge = string.upper(poi.category or "")
-    local badge_color = COLOR_DARKGREY
-    if poi.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
-    elseif poi.category == 'visitor_local' then badge_color = COLOR_CYAN
-    elseif poi.category == 'resident' then badge_color = COLOR_CYAN end
+    local cat_badge, badge_color = getCategoryBadge(poi.category)
     
     -- Threat display (use boosted score if available to reflect actual priority)
     local effective_score = poi.poi_score or poi.score or 0
@@ -3295,7 +3264,7 @@ function JusticeHQ:buildPOICard(poi, total_pois)
     end
 
     -- Build the card rows
-    local border = string.char(205):rep(78)
+    local border = string.char(205):rep(100)
     local title_label = " PERSON OF INTEREST"
     if total_pois and total_pois > 1 then
         title_label = title_label .. string.format(" (%d/%d)", PERSISTENT_UI.poi_index or 1, total_pois)
@@ -3495,7 +3464,7 @@ function JusticeHQ:buildNetworkChoices()
             })
         end
         table.insert(list_choices, {
-            text = {{text = string.char(196):rep(78), pen = COLOR_GREY}},
+            text = {{text = string.char(196):rep(100), pen = COLOR_GREY}},
             data = nil,
             search_key = "",
         })
@@ -3510,7 +3479,7 @@ function JusticeHQ:buildNetworkChoices()
             search_key = "",
         })
         table.insert(list_choices, {
-            text = {{text = string.char(196):rep(78), pen = COLOR_GREY}},
+            text = {{text = string.char(196):rep(100), pen = COLOR_GREY}},
             data = nil,
             search_key = "",
         })
@@ -3609,8 +3578,8 @@ function JusticeHQ:buildNetworkChoices()
         local part3 = string.format(" %s %s ", string.char(196):rep(3), plot_summary)
         
         local total_len = #part1 + #part2 + #part3
-        if total_len < 80 then
-            part3 = part3 .. string.char(196):rep(80 - total_len)
+        if total_len < 100 then
+            part3 = part3 .. string.char(196):rep(100 - total_len)
         end
         
         table.insert(list_choices, {
@@ -3661,17 +3630,8 @@ function JusticeHQ:buildNetworkChoices()
             local badge_color = COLOR_DARKGREY
             local name_color = COLOR_WHITE
             if target_s then
-                cat_badge = string.upper(target_s.category)
-                if target_s.category == 'visitor_foreign' then 
-                    badge_color = COLOR_LIGHTCYAN
-                    name_color = COLOR_LIGHTCYAN
-                elseif target_s.category == 'visitor_local' then 
-                    badge_color = COLOR_CYAN
-                    name_color = COLOR_CYAN
-                elseif target_s.category == 'resident' then 
-                    badge_color = COLOR_CYAN
-                    name_color = COLOR_CYAN
-                end
+                cat_badge, badge_color = getCategoryBadge(target_s.category)
+                name_color = (badge_color == COLOR_DARKGREY) and COLOR_WHITE or badge_color
             end
             
             local text_arr = {
@@ -3729,14 +3689,10 @@ function JusticeHQ:buildNetworkChoices()
     end
     
     if #unaffiliated > 0 then
-        local header = string.format(" %s UNAFFILIATED SUSPECTS %s", string.char(196):rep(3), string.char(196):rep(50))
+        local header = string.format(" %s UNAFFILIATED SUSPECTS %s", string.char(196):rep(3), string.char(196):rep(72))
         table.insert(list_choices, {text = {{text = header, pen = COLOR_LIGHTBLUE}}, data = nil})
         for _, s in ipairs(unaffiliated) do
-            local cat_badge = string.upper(s.category)
-            local badge_color = COLOR_DARKGREY
-            if s.category == 'visitor_foreign' then badge_color = COLOR_LIGHTCYAN
-            elseif s.category == 'visitor_local' then badge_color = COLOR_CYAN
-            elseif s.category == 'resident' then badge_color = COLOR_CYAN end
+            local cat_badge, badge_color = getCategoryBadge(s.category)
             
             local crimes_summary = "No crimes on file"
             if s.crime_data and #s.crime_data.crimes_list > 0 then
@@ -3947,12 +3903,6 @@ function JusticeHQ:onOpenCaseFile(idx, choice)
         table.insert(lines, {text = string.upper(s.category), pen = COLOR_LIGHTCYAN})
     end
     table.insert(lines, NEWLINE)
-    if s.category and s.category ~= 'citizen' then
-        table.insert(lines, {text = string.char(16) .. " Foreign national - cannot be sentenced through normal justice.", pen = COLOR_YELLOW})
-        table.insert(lines, NEWLINE)
-        table.insert(lines, {text = "  Use [p] Pardon to release, or [k] Execute for permanent removal.", pen = COLOR_DARKGREY})
-        table.insert(lines, NEWLINE)
-    end
 
     -- Check for pending sentences
     local pending_sentences = {}
@@ -4471,7 +4421,7 @@ function JusticeHQ:gatherSuspects(include_all_citizens)
                 
                 local full_name = dfhack.translation.translateName(dfhack.units.getVisibleName(unit))
                 if not full_name or full_name == "" then full_name = dfhack.units.getReadableName(unit) end
-                local first_name = full_name -- ponytail: full untranslated name used everywhere
+                local first_name = full_name -- full untranslated name used everywhere
                 local short_name = first_name .. " (" .. race_name .. ")"
                 
                 table.insert(suspects, {
@@ -4548,93 +4498,7 @@ function JusticeHQ:refreshCurrentDossier()
     end
 end
 
--- ===========================
--- CP437→UTF-8 converter (mixed-encoding aware)
--- DF names use CP437 single bytes; our Lua literals use UTF-8 multi-byte.
--- Scans bytes: valid UTF-8 sequences pass through, standalone high bytes → CP437 lookup.
--- ===========================
 
-local CP437 = {
-    [11]="\226\153\130",  -- ♂
-    [12]="\226\153\128",  -- ♀
-    [15]="\226\152\188",  -- ☼
-    [16]="\226\150\186",  -- ►
-    [23]="\226\134\149",  -- ↕
-    [30]="\226\150\178",  -- ▲
-    [31]="\226\150\188",  -- ▼
-    [128]="\195\135",[129]="\195\188",[130]="\195\169",[131]="\195\162",
-    [132]="\195\164",[133]="\195\160",[134]="\195\165",[135]="\195\167",
-    [136]="\195\170",[137]="\195\171",[138]="\195\168",[139]="\195\175",
-    [140]="\195\174",[141]="\195\172",[142]="\195\132",[143]="\195\133",
-    [144]="\195\137",[145]="\195\166",[146]="\195\134",[147]="\195\180",
-    [148]="\195\182",[149]="\195\178",[150]="\195\187",[151]="\195\185",
-    [152]="\195\191",[153]="\195\150",[154]="\195\156",[155]="\194\162",
-    [156]="\194\163",[157]="\194\165",[158]="\226\130\167",[159]="\198\146",
-    [160]="\195\161",[161]="\195\173",[162]="\195\179",[163]="\195\186",
-    [164]="\195\177",[165]="\195\145",[166]="\194\170",[167]="\194\186",
-    [168]="\194\191",[169]="\226\140\144",[170]="\194\172",[171]="\194\189",
-    [172]="\194\188",[173]="\194\161",[174]="\194\171",[175]="\194\187",
-    [176]="\226\150\145",[177]="\226\150\146",[178]="\226\150\147",
-    [179]="\226\148\130",[180]="\226\148\164",[181]="\226\149\161",
-    [182]="\226\149\162",[183]="\226\149\150",[184]="\226\149\149",
-    [185]="\226\149\163",[186]="\226\149\145",[187]="\226\149\151",
-    [188]="\226\149\157",[189]="\226\149\156",[190]="\226\149\155",
-    [191]="\226\148\144",[192]="\226\148\148",[193]="\226\148\180",
-    [194]="\226\148\172",[195]="\226\148\156",[196]="\226\148\128",
-    [197]="\226\148\188",[198]="\226\149\158",[199]="\226\149\159",
-    [200]="\226\149\154",[201]="\226\149\148",[202]="\226\149\169",
-    [203]="\226\149\166",[204]="\226\149\160",[205]="\226\149\144",
-    [206]="\226\149\172",[207]="\226\149\167",[208]="\226\149\168",
-    [209]="\226\149\164",[210]="\226\149\165",[211]="\226\149\153",
-    [212]="\226\149\152",[213]="\226\149\146",[214]="\226\149\147",
-    [215]="\226\149\171",[216]="\226\149\170",[217]="\226\148\152",
-    [218]="\226\148\140",[219]="\226\150\136",[220]="\226\150\132",
-    [221]="\226\150\140",[222]="\226\150\144",[223]="\226\150\128",
-    [224]="\206\177",[225]="\195\159",[226]="\206\147",[227]="\207\128",
-    [228]="\206\163",[229]="\207\131",[230]="\194\181",[231]="\207\132",
-    [232]="\206\166",[233]="\206\152",[234]="\206\169",[235]="\206\180",
-    [236]="\226\136\158",[237]="\207\134",[238]="\206\181",[239]="\226\136\169",
-    [240]="\226\137\161",[241]="\194\177",[242]="\226\137\165",[243]="\226\137\164",
-    [244]="\226\140\160",[245]="\226\140\161",[246]="\195\183",[247]="\226\137\136",
-    [248]="\194\176",[249]="\226\136\153",[250]="\194\183",[251]="\226\136\154",
-    [252]="\226\129\191",[253]="\194\178",[254]="\226\150\160",[255]="\194\160",
-}
-
-local function convertMixedToUtf8(raw)
-    local out = {}
-    local i, len = 1, #raw
-    while i <= len do
-        local b = raw:byte(i)
-        if b < 128 then
-            -- Check for CP437 graphic chars in control range (♀=12, ☼=15, ►=16)
-            out[#out+1] = CP437[b] or raw:sub(i,i); i = i+1
-        elseif b >= 0xC2 and b <= 0xDF and i+1 <= len then
-            local b2 = raw:byte(i+1)
-            if b2 >= 0x80 and b2 <= 0xBF then
-                out[#out+1] = raw:sub(i,i+1); i = i+2  -- valid 2-byte UTF-8
-            else
-                out[#out+1] = CP437[b] or '?'; i = i+1
-            end
-        elseif b >= 0xE0 and b <= 0xEF and i+2 <= len then
-            local b2, b3 = raw:byte(i+1), raw:byte(i+2)
-            if b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
-                out[#out+1] = raw:sub(i,i+2); i = i+3  -- valid 3-byte UTF-8
-            else
-                out[#out+1] = CP437[b] or '?'; i = i+1
-            end
-        elseif b >= 0xF0 and b <= 0xF7 and i+3 <= len then
-            local b2, b3, b4 = raw:byte(i+1), raw:byte(i+2), raw:byte(i+3)
-            if b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF and b4 >= 0x80 and b4 <= 0xBF then
-                out[#out+1] = raw:sub(i,i+3); i = i+4  -- valid 4-byte UTF-8
-            else
-                out[#out+1] = CP437[b] or '?'; i = i+1
-            end
-        else
-            out[#out+1] = CP437[b] or '?'; i = i+1  -- standalone high byte → CP437
-        end
-    end
-    return table.concat(out)
-end
 
 -- ===========================
 -- Clipboard Export: O(n) serialization
@@ -4756,7 +4620,7 @@ function JusticeHQ:serializeCurrentTab()
     
     -- O(n) join: single allocation
     local raw = "=== CI-HQ: " .. tab_name .. " ===\n" .. table.concat(lines, '\n')
-    local output = convertMixedToUtf8(raw)
+    local output = dfhack.df2utf(raw)
     return output, tab_name, nil, raw  -- raw = original CP437 mixed for clipboard API
 end
 
@@ -4969,135 +4833,21 @@ function JusticeHQ:onConvict()
                 table.insert(sentence_lines, "  - No additional penalty")
             end
 
-            -- Check diplomatic protection for non-citizens
-            local has_diplomatic_protection = false
-            local civ_name = "an unknown civilization"
-            local is_noncitizen = (suspect.category ~= 'citizen')
-
-            if is_noncitizen then
-                -- Scan the HF's entity links for active membership in ANY
-                -- foreign civilization. Residents have their unit.civ_id
-                -- updated to the player's civ, so we can't rely on that.
-                local player_civ = df.global.plotinfo.civ_id
-                local hf_id = unit.hist_figure_id
-                if hf_id >= 0 then
-                    local hf = df.historical_figure.find(hf_id)
-                    if hf then
-                        for _, link in ipairs(hf.entity_links) do
-                            if df.histfig_entity_link_memberst:is_instance(link)
-                               and link.entity_id ~= player_civ then
-                                -- Verify this entity is a civilization (not a site gov/guild/religion)
-                                local ent = df.historical_entity.find(link.entity_id)
-                                if ent and ent.type == df.historical_entity_type.Civilization then
-                                    has_diplomatic_protection = true
-                                    pcall(function() civ_name = dfhack.translation.translateName(ent.name, true) end)
-                                    break
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-
-            -- Build the confirmation text
-            local cat_str = string.upper(suspect.category)
             local charges_str = ""
             for i, cname in ipairs(crime_names) do
                 charges_str = charges_str .. "  " .. i .. ". " .. cname .. "\n"
             end
             local sentence_str = table.concat(sentence_lines, "\n") .. "\n"
 
-            local text = ""
             local dialog_title = "CI-HQ: Convict Suspect"
-            local dialog_color = COLOR_LIGHTCYAN
-
-            if has_diplomatic_protection then
-                -- CASE 1: Foreign visitor with active citizenship
-                dialog_title = "CI-HQ: Convict Foreign National"
-                dialog_color = COLOR_LIGHTRED
-                text = {
-                    {text="WARNING: ", pen=COLOR_RED},
-                    {text=suspect.name, pen=COLOR_CYAN},
-                    " is a ",
-                    {text=cat_str, pen=COLOR_GREEN},
-                    "\nand active citizen of ",
-                    {text=civ_name, pen=COLOR_YELLOW},
-                    ".\n\n",
-                    "As a foreign national under diplomatic protection,\n",
-                    "your justice system has ",
-                    {text="no authority to permanently", pen=COLOR_RED},
-                    "\n",
-                    {text="incarcerate them.", pen=COLOR_RED},
-                    "\n\n",
-                    "Any corporal punishment (beatings/hammer strikes)\n",
-                    "will be carried out by the Captain of the Guard.\n",
-                    "However, the game engine will silently ",
-                    {text="void their", pen=COLOR_YELLOW},
-                    "\n",
-                    {text="prison sentence", pen=COLOR_YELLOW},
-                    " because they cannot be assigned\n",
-                    "to a jail chain.\n\n",
-                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str,
-                    "\nSentence if convicted:\n" .. sentence_str,
-                    "\nMeaning, any prison sentences for " .. suspect.first_name .. " will\n",
-                    "be ",
-                    {text="void", pen=COLOR_YELLOW},
-                    ". They will only receive the beatings/\n",
-                    "hammer strikes, unless you use ",
-                    {text="[k] Execute", pen=COLOR_RED},
-                    " instead.\n\n",
-                    "Do you still want to officially convict them?"
-                }
-
-            elseif is_noncitizen then
-                -- CASE 2: Outcast / stateless visitor
-                dialog_title = "CI-HQ: Convict Stateless Visitor"
-                dialog_color = COLOR_LIGHTRED
-                text = {
-                    {text=suspect.name, pen=COLOR_CYAN},
-                    " is a ",
-                    {text=cat_str, pen=COLOR_GREEN},
-                    " (",
-                    {text="Outcast / Stateless", pen=COLOR_GREY},
-                    ").\n\n",
-                    "This visitor has no diplomatic protection. Your\n",
-                    "justice system has full authority over them.\n\n",
-                    "All corporal punishment (beatings/hammer strikes)\n",
-                    "will be carried out by the Captain of the Guard.\n",
-                    "However, the game engine will silently ",
-                    {text="void their", pen=COLOR_YELLOW},
-                    "\n",
-                    {text="prison sentence", pen=COLOR_YELLOW},
-                    " because visitors cannot be assigned\n",
-                    "to a dwarven jail chain.\n\n",
-                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str,
-                    "\nSentence if convicted:\n" .. sentence_str,
-                    "\nMeaning, any prison sentences for " .. suspect.first_name .. " will\n",
-                    "be ",
-                    {text="void", pen=COLOR_YELLOW},
-                    ". They will only receive the beatings/\n",
-                    "hammer strikes, unless you use ",
-                    {text="[k] Execute", pen=COLOR_RED},
-                    " instead.\n\n",
-                    "Authorize conviction?"
-                }
-
-            else
-                -- CASE 3: Citizen = standard conviction
-                dialog_title = "CI-HQ: Convict Citizen"
-                dialog_color = COLOR_LIGHTRED
-                text = {
-                    {text=suspect.name, pen=COLOR_CYAN},
-                    "\n\n",
-                    "Charges (" .. #selected_crimes .. "):\n" .. charges_str,
-                    "\nSentence:\n" .. sentence_str,
-                    "\nAll penalties will be enforced through the normal\n",
-                    "dwarven justice system. The Captain of the Guard\n",
-                    "will carry out any beatings, and the suspect will\n",
-                    "be jailed for the full prison duration.\n\n",
-                    "Authorize conviction?"
-                }
-            end
+            local dialog_color = COLOR_LIGHTRED
+            local text = {
+                {text=suspect.name, pen=COLOR_CYAN},
+                "\n\n",
+                "Charges (" .. #selected_crimes .. "):\n" .. charges_str,
+                "\nSentence:\n" .. sentence_str,
+                "\nAuthorize conviction?"
+            }
 
             local function execute_conviction()
                 local convicted_count = 0
@@ -5290,11 +5040,9 @@ function JusticeHQ:onExecute()
             message_label_attrs = {
                 frame = {t=0, l=0, b=4},
                 text = 'Target: ' .. name .. '\n\n' ..
-                       'This suspect is a non-citizen visitor. The dwarven justice\n' ..
-                       'system often rejects punishment orders for foreign nationals.\n\n' ..
+                       'This suspect is a non-citizen visitor.\n\n' ..
                        'CI-HQ will attempt to assign the execution to the ' .. executor_name .. '.\n' ..
-                       'If the justice system voids the order, or if the target\n' ..
-                       'survives for 7 days, CI-HQ will automatically trigger a\n' ..
+                       'If the target survives for 7 days, CI-HQ will automatically trigger a\n' ..
                        'lethal fallback mechanism (Fortress Security).\n\n' ..
                        'Authorize execution?',
                 text_pen = COLOR_LIGHTRED,
@@ -5600,126 +5348,128 @@ function interrogationMonitorTick()
         local any_active = false
         
         for uid, watch in pairs(interrogation_watchlist) do
-            if watch.status == 'active' or watch.status == 'dispatched' then
-                local unit = df.unit.find(uid)
-                if not unit or dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then
-                    watch.status = (unit and not dfhack.units.isDead(unit)) and 'escaped' or 'dead'
-                    local reason = watch.status == 'escaped' and "has left the map!" or "has died!"
-                    cihq_announce("CI-HQ: " .. watch.name .. " " .. reason .. " Interrogation aborted.", COLOR_RED, true)
-                    persist_state()
+            if watch.status ~= 'active' and watch.status ~= 'dispatched' then goto continue end
+            
+            local unit = df.unit.find(uid)
+            if not unit or dfhack.units.isDead(unit) or not dfhack.units.isActive(unit) then
+                watch.status = (unit and not dfhack.units.isDead(unit)) and 'escaped' or 'dead'
+                local reason = watch.status == 'escaped' and "has left the map!" or "has died!"
+                cihq_announce("CI-HQ: " .. watch.name .. " " .. reason .. " Interrogation aborted.", COLOR_RED, true)
+                persist_state()
+                goto continue
+            end
+            
+            any_active = true
+            
+            -- Check if Captain is currently interrogating
+            local guard = findCaptainOfGuard()
+            local guard_is_interrogating = false
+            local guard_is_busy_justice = false
+            if guard and guard.job.current_job then
+                local jt = guard.job.current_job.job_type
+                if jt == df.job_type.InterrogateSubject then
+                    guard_is_interrogating = true
+                    guard_is_busy_justice = true
+                elseif jt == df.job_type.BeatCriminal or jt == df.job_type.ExecuteCriminal then
+                    guard_is_busy_justice = true
+                end
+            end
+            
+            -- 1. Check for new interrogation reports (catches vanilla UI interrogations too)
+            local global_report_count = #df.global.world.status.interrogation_reports
+            local reports_found = false
+            local is_dud = true
+            local latest_report = nil
+            local latest_outcome = nil
+            
+            if global_report_count > (watch.last_global_report_count or 0) then
+                reports_found = true
+                for i = #df.global.world.status.interrogation_reports - 1, 0, -1 do
+                    local r = df.global.world.status.interrogation_reports[i]
+                    if r.subject_hf == unit.hist_figure_id then
+                        latest_report = r
+                        break
+                    end
+                end
+                
+                if latest_report then
+                    latest_outcome = computeIntelOutcome(latest_report)
+                    if latest_outcome == 'CONFESSED' or latest_outcome == 'NEW INTEL' then
+                        is_dud = false
+                    end
+                end
+                watch.last_global_report_count = global_report_count
+            end
+
+            if reports_found then
+                watch.retries = (watch.retries or 0) + 1
+                if not is_dud then
+                    watch.consecutive_duds = 0
+                    if latest_outcome == 'CONFESSED' then
+                        watch.status = 'confessed'
+                        cihq_announce("CI-HQ: " .. watch.name .. " confessed under interrogation! All crimes revealed. Case closed.", COLOR_LIGHTGREEN, true)
+                        CRIME_CACHE = nil
+                        INTERROGATION_HISTORY_CACHE = nil
+                        persist_state()
+                    elseif watch.retries >= watch.max_retries then
+                        watch.status = 'concluded'
+                        cihq_announce("CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
+                        persist_state()
+                    else
+                        watch.status = 'active'
+                        watch.dispatched_tick = nil
+                        cihq_announce("CI-HQ: " .. watch.name .. " revealed new intel! Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_LIGHTGREEN, true)
+                        persist_state()
+                    end
                 else
-                    any_active = true
-                        
-                        -- Check if Captain is currently interrogating
-                        local guard = findCaptainOfGuard()
-                        local guard_is_interrogating = false
-                        local guard_is_busy_justice = false
-                        if guard and guard.job.current_job then
-                            local jt = guard.job.current_job.job_type
-                            if jt == df.job_type.InterrogateSubject then
-                                guard_is_interrogating = true
-                                guard_is_busy_justice = true
-                            elseif jt == df.job_type.BeatCriminal or jt == df.job_type.ExecuteCriminal then
-                                guard_is_busy_justice = true
-                            end
-                        end
-                        
-                        -- 1. Check for new interrogation reports (catches vanilla UI interrogations too)
-                        local global_report_count = #df.global.world.status.interrogation_reports
-                        local reports_found = false
-                        local is_dud = true
-                        local latest_report = nil
-                        local latest_outcome = nil
-                        
-                        if global_report_count > (watch.last_global_report_count or 0) then
-                            reports_found = true
-                            for i = #df.global.world.status.interrogation_reports - 1, 0, -1 do
-                                local r = df.global.world.status.interrogation_reports[i]
-                                if r.subject_hf == unit.hist_figure_id then
-                                    latest_report = r
-                                    break
-                                end
-                            end
-                            
-                            if latest_report then
-                                latest_outcome = computeIntelOutcome(latest_report)
-                                if latest_outcome == 'CONFESSED' or latest_outcome == 'NEW INTEL' then
-                                    is_dud = false
-                                end
-                            end
-                            watch.last_global_report_count = global_report_count
-                        end
-
-                        if reports_found then
-                            watch.retries = (watch.retries or 0) + 1
-                            if not is_dud then
-                                watch.consecutive_duds = 0
-                                if latest_outcome == 'CONFESSED' then
-                                    watch.status = 'confessed'
-                                    cihq_announce("CI-HQ: " .. watch.name .. " confessed under interrogation! All crimes revealed. Case closed.", COLOR_LIGHTGREEN, true)
-                                    CRIME_CACHE = nil
-                                    INTERROGATION_HISTORY_CACHE = nil
-                                    persist_state()
-                                elseif watch.retries >= watch.max_retries then
-                                    watch.status = 'concluded'
-                                    cihq_announce("CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
-                                    persist_state()
-                                else
-                                    watch.status = 'active'
-                                    watch.dispatched_tick = nil
-                                    cihq_announce("CI-HQ: " .. watch.name .. " revealed new intel! Re-dispatching (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_LIGHTGREEN, true)
-                                    persist_state()
-                                end
-                            else
-                                watch.consecutive_duds = (watch.consecutive_duds or 0) + 1
-                                local dud_msg = latest_outcome == 'REFUSED' and "refused to cooperate" or "revealed no new intel"
-                                
-                                if watch.consecutive_duds >= MAX_CONSECUTIVE_DUDS then
-                                    watch.status = 'concluded'
-                                    cihq_announce("CI-HQ: " .. watch.name .. " " .. dud_msg .. " after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.", COLOR_YELLOW, true)
-                                    persist_state()
-                                elseif watch.retries >= watch.max_retries then
-                                    watch.status = 'concluded'
-                                    cihq_announce("CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
-                                    persist_state()
-                                else
-                                    watch.status = 'active'
-                                    watch.dispatched_tick = nil
-                                    cihq_announce("CI-HQ: " .. watch.name .. " " .. dud_msg .. " (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_CYAN, true)
-                                    persist_state()
-                                end
-                            end
-                        end
-
-                        -- 2. Prune stale watchlist entries (e.g. convicted via Vanilla UI)
-                        if (watch.status == 'active' or watch.status == 'dispatched') and not isSuspectStillThreat(uid) then
-                            watch.status = 'concluded'
-                            cihq_announce("CI-HQ: " .. watch.name .. " is no longer a threat. Interrogation concluded.", COLOR_GREEN, true)
-                            persist_state()
-                        end
-
-                        -- 3. Handle dispatching
-                        if watch.status == 'active' then
-                            if not guard_is_busy_justice then
-                                watch.last_global_report_count = #df.global.world.status.interrogation_reports
-                                if dispatchGuardToSuspect(uid) then
-                                    watch.status = 'dispatched'
-                                    watch.dispatched_tick = df.global.cur_year_tick
-                                    cihq_announce("CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".", COLOR_LIGHTGREEN, true)
-                                end
-                            end
-                        elseif watch.status == 'dispatched' then
-                            local elapsed = df.global.cur_year_tick - (watch.dispatched_tick or 0)
-                            if elapsed < 0 then elapsed = elapsed + 403200 end -- handle year wrap
-                            if not guard_is_busy_justice and elapsed >= 100 then
-                                -- Guard is idle, enough time passed, but NO report appeared. Job interrupted.
-                                watch.status = 'active'
-                                watch.dispatched_tick = nil
-                            end
-                        end
+                    watch.consecutive_duds = (watch.consecutive_duds or 0) + 1
+                    local dud_msg = latest_outcome == 'REFUSED' and "refused to cooperate" or "revealed no new intel"
+                    
+                    if watch.consecutive_duds >= MAX_CONSECUTIVE_DUDS then
+                        watch.status = 'concluded'
+                        cihq_announce("CI-HQ: " .. watch.name .. " " .. dud_msg .. " after " .. watch.consecutive_duds .. " consecutive attempts. Concluded.", COLOR_YELLOW, true)
+                        persist_state()
+                    elseif watch.retries >= watch.max_retries then
+                        watch.status = 'concluded'
+                        cihq_announce("CI-HQ: " .. watch.name .. " reached max attempts (" .. watch.retries .. "). Concluded.", COLOR_YELLOW, true)
+                        persist_state()
+                    else
+                        watch.status = 'active'
+                        watch.dispatched_tick = nil
+                        cihq_announce("CI-HQ: " .. watch.name .. " " .. dud_msg .. " (" .. watch.consecutive_duds .. "/" .. MAX_CONSECUTIVE_DUDS .. "). Retrying (" .. watch.retries .. "/" .. watch.max_retries .. ")...", COLOR_CYAN, true)
+                        persist_state()
                     end
                 end
             end
+
+            -- 2. Prune stale watchlist entries (e.g. convicted via Vanilla UI)
+            if (watch.status == 'active' or watch.status == 'dispatched') and not isSuspectStillThreat(uid) then
+                watch.status = 'concluded'
+                cihq_announce("CI-HQ: " .. watch.name .. " is no longer a threat. Interrogation concluded.", COLOR_GREEN, true)
+                persist_state()
+            end
+
+            -- 3. Handle dispatching
+            if watch.status == 'active' then
+                if not guard_is_busy_justice then
+                    watch.last_global_report_count = #df.global.world.status.interrogation_reports
+                    if dispatchGuardToSuspect(uid) then
+                        watch.status = 'dispatched'
+                        watch.dispatched_tick = df.global.cur_year_tick
+                        cihq_announce("CI-HQ: Captain dispatched! Interrogating " .. watch.name .. ".", COLOR_LIGHTGREEN, true)
+                    end
+                end
+            elseif watch.status == 'dispatched' then
+                local elapsed = df.global.cur_year_tick - (watch.dispatched_tick or 0)
+                if elapsed < 0 then elapsed = elapsed + 403200 end -- handle year wrap
+                if not guard_is_busy_justice and elapsed >= 100 then
+                    -- Guard is idle, enough time passed, but NO report appeared. Job interrupted.
+                    watch.status = 'active'
+                    watch.dispatched_tick = nil
+                end
+            end
+            ::continue::
+        end
         
         -- Execution Monitor Logic
         local any_exec_active = false
@@ -5858,7 +5608,6 @@ function CIHQNotifyOverlay:preUpdateLayout(parent_rect)
     self.frame.h = parent_rect.height
 end
 
-local CIHQ_NOTIFICATION_LIFETIME_MS = 10000  -- 10 seconds real-time
 
 function CIHQNotifyOverlay:render(dc)
     -- Expire old notifications
@@ -6063,8 +5812,6 @@ local function processNewCrimes(is_initial_scan)
                                 dfhack.gui.revealInDwarfmodeMap(accused_unit.pos, true)
                             elseif dfhack.gui.pauseRecenter then
                                 dfhack.gui.pauseRecenter(accused_unit.pos)
-                            elseif dfhack.gui.recenterCamera then
-                                dfhack.gui.recenterCamera(accused_unit.pos)
                             end
                         end)
                         
@@ -6096,11 +5843,11 @@ local function processNewCrimes(is_initial_scan)
                             },
                             on_accept = function()
                                 dialog:dismiss()
-                                cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " — handle manually via CI-HQ.", COLOR_YELLOW, true)
+                                cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " - handle manually via CI-HQ.", COLOR_YELLOW, true)
                             end,
                             on_cancel = function()
                                 dialog:dismiss()
-                                cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " — handle manually via CI-HQ.", COLOR_YELLOW, true)
+                                cihq_announce("CI-HQ ALERT: " .. crime_name .. " by " .. thief_name .. " - handle manually via CI-HQ.", COLOR_YELLOW, true)
                             end,
                         }
                         dialog:show()
@@ -6204,8 +5951,6 @@ function ci_alert_monitor_tick()
                                 dfhack.gui.revealInDwarfmodeMap(unit.pos, true)
                             elseif dfhack.gui.pauseRecenter then
                                 dfhack.gui.pauseRecenter(unit.pos)
-                            elseif dfhack.gui.recenterCamera then
-                                dfhack.gui.recenterCamera(unit.pos)
                             end
                         end)
                         

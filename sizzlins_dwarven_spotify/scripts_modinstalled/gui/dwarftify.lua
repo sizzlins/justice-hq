@@ -107,75 +107,14 @@ local function harvestMusic()
     local library = {}
     local authors = {}
 
-    -- Ensure the custom music drop folder exists
-    dfhack.filesystem.mkdir_recursive(CUSTOM_MUSIC_DIR)
-    
-    local custom_titles = {}
-    local custom_basenames = {}
-    local files = dfhack.filesystem.listdir_recursive(CUSTOM_MUSIC_DIR, 0)
-    if files then
-        for _, entry in ipairs(files) do
-            if not entry.isdir and entry.path then
-                local filename = entry.path:match('([^/\\]+)$') or entry.path
-                if filename:lower():match('%.ogg$') then
-                    local base_name = filename:match('^(.+)%.ogg$') or filename
-                    local safe_name = base_name:lower():gsub('[^%w_]', '_')
-                    if #safe_name > 10 then safe_name = safe_name:sub(1, 10) end
-                    
-                    local hash = 0
-                    for k = 1, #base_name do hash = (hash * 31 + string.byte(base_name, k)) % 10000 end
-                    
-                    local track_id = 'DWARFTIFY_' .. safe_name:upper() .. '_' .. string.format('%04d', hash)
-                    custom_titles[track_id] = base_name:gsub('_', ' '):gsub('(%w)(%w*)', function(a, b) return a:upper() .. b:lower() end)
-                    table.insert(custom_basenames, base_name)
-                end
-            end
-        end
-    end
-
     local raws_by_id = {}
     if df.global.world and df.global.world.raws and df.global.world.raws.music then
         local mall = df.global.world.raws.music.all
         for i = 0, #mall - 1 do
             local raw = mall[i]
             if raw then
-                local title = formatVanillaName(raw.token)
                 local is_custom = raw.token:find('^DWARFTIFY_')
-                
-                -- For custom tracks, try to fetch the exact untruncated filename from disk
-                if is_custom then
-                    title = custom_titles[raw.token]
-                    if not title then
-                        -- Fuzzy fallback for extremely old tokens that lacked hashes or were heavily truncated
-                        local stripped_token = raw.token:gsub('^DWARFTIFY_', ''):gsub('_', ''):lower()
-                        for _, base_name in ipairs(custom_basenames) do
-                            local stripped_base = base_name:gsub('[^%w]', ''):lower()
-                            -- Compare first 15 characters to guarantee a match
-                            if stripped_base:sub(1, 15) == stripped_token:sub(1, 15) then
-                                title = base_name:gsub('_', ' '):gsub('(%w)(%w*)', function(a, b) return a:upper() .. b:lower() end)
-                                break
-                            end
-                        end
-                        
-                        -- Ultimate fallback if file no longer exists on disk
-                        if not title then
-                            local nice = raw.token:gsub('^DWARFTIFY_', '')
-                            nice = nice:gsub('_%d+$', '')
-                            title = nice:gsub('_', ' '):gsub('(%w)(%w*)', function(a, b) return a:upper() .. b:lower() end)
-                        end
-                    end
-                elseif raw.current_definition then
-                    for j = 0, #raw.current_definition - 1 do
-                        local ok2, def = pcall(function() return raw.current_definition[j].value end)
-                        if ok2 and def then
-                            local fname = def:match('%[FILE:(.+)%]')
-                            if fname then
-                                title = fname:gsub('_', ' '):gsub('(%w)(%w*)', function(a, b) return a:upper() .. b:lower() end)
-                                break
-                            end
-                        end
-                    end
-                end
+                local title = is_custom and raw.token:gsub('^DWARFTIFY_', ''):gsub('_%d+$', ''):gsub('_', ' '):gsub('(%w)(%w*)', function(a, b) return a:upper() .. b:lower() end) or formatVanillaName(raw.token)
                 
                 raws_by_id[raw.song] = {
                     id = raw.song,
@@ -374,7 +313,7 @@ local function setGameTrack(id)
         -- Tell the engine to instantly kill whatever is currently playing (songs or interlude cards).
         -- This natively triggers FMOD's hardcoded 3-second fade-out.
         m.next_play_duration = 0
-        if m.card_duration then m.card_duration = 0 end
+        if m._fields.card_duration then m.card_duration = 0 end
         
         -- We must wait for FMOD to finish its 3-second fade-out.
         -- If we try to force a track instantly during the fade, FMOD will crash,
@@ -449,17 +388,14 @@ function playNextTrack()
     
     local finished_track = table.remove(STATE.queue, 1)
     if STATE.repeat_mode == 'all' and finished_track then
-        table.insert(STATE.queue, finished_track)
+        if STATE.shuffle and #STATE.queue > 0 then
+            table.insert(STATE.queue, math.random(1, #STATE.queue + 1), finished_track)
+        else
+            table.insert(STATE.queue, finished_track)
+        end
     end
     
     if #STATE.queue > 0 then
-        if STATE.shuffle and #STATE.queue > 1 then
-            local target_idx = math.random(2, #STATE.queue)
-            local swap = STATE.queue[1]
-            STATE.queue[1] = STATE.queue[target_idx]
-            STATE.queue[target_idx] = swap
-        end
-        
         local next_track = STATE.queue[1]
         saveConfig()
         if GLOBAL_DWARFTIFY_SCREEN then GLOBAL_DWARFTIFY_SCREEN:updateFilters() end
@@ -501,16 +437,26 @@ end
 
 function toggleShuffle()
     STATE.shuffle = not STATE.shuffle
+    if STATE.shuffle and #STATE.queue > 1 then
+        local first = table.remove(STATE.queue, 1)
+        for i = #STATE.queue, 2, -1 do
+            local j = math.random(i)
+            local temp = STATE.queue[i]
+            STATE.queue[i] = STATE.queue[j]
+            STATE.queue[j] = temp
+        end
+        table.insert(STATE.queue, 1, first)
+    end
     saveConfig()
 end
 
 function toggleLike(track)
     if not track then return end
-    local id_str = tostring(track.id)
-    if STATE.liked_songs[id_str] then
-        STATE.liked_songs[id_str] = nil
+    local key = track.orig_id or tostring(track.id)
+    if STATE.liked_songs[key] then
+        STATE.liked_songs[key] = nil
     else
-        STATE.liked_songs[id_str] = true
+        STATE.liked_songs[key] = true
     end
     saveConfig()
 end
@@ -573,17 +519,22 @@ GLOBAL_DWARFTIFY_SCREEN = nil
 function Dwarftify:init()
     GLOBAL_DWARFTIFY_SCREEN = self
     loadConfig()
-    pcall(dfhack.run_script, 'dwarftify-sync')
     self.library, self.authors = harvestMusic()
     
-    -- Heal legacy truncated titles from persistent config
+    -- Heal engine IDs (volatile) and legacy titles using stable orig_id (tokens)
     local lib_map = {}
-    for _, t in ipairs(self.library) do lib_map[t.id] = t end
+    local lib_by_orig = {}
+    for _, t in ipairs(self.library) do 
+        lib_map[t.id] = t 
+        if t.orig_id then lib_by_orig[t.orig_id] = t end
+    end
     for _, q in ipairs(STATE.queue) do
-        local lt = lib_map[q.id]
+        local lt = (q.orig_id and lib_by_orig[q.orig_id]) or lib_map[q.id]
         if lt then
+            q.id = lt.id -- Update to current engine ID!
             q.title = lt.title
             q.author = lt.author
+            q.orig_id = lt.orig_id
         end
     end
     saveConfig()
@@ -608,7 +559,6 @@ function Dwarftify:init()
                             text = STATE.search_string,
                             on_change = function(text) 
                                 STATE.search_string = text
-                                saveConfig()
                                 self:updateFilters()
                             end,
                         },
@@ -763,7 +713,12 @@ function Dwarftify:init()
                         widgets.FilteredList{
                             view_id = 'list_liked',
                             frame = {t = 0, l = 0, r = 0, b = 0},
-                            on_submit = function(idx, choice) playTrackNow(choice.track) end,
+                            on_submit = function(idx, choice)
+                                local now = dfhack.getTickCount()
+                                if now - last_submit_tick < 500 then return end
+                                last_submit_tick = now
+                                playTrackNow(choice.track) 
+                            end,
                             on_submit2 = function(idx, choice) enqueueTrack(choice.track) end,
                         }
                     }
@@ -925,7 +880,7 @@ function Dwarftify:updateFilters()
             local author_data = self.authors[self.selected_author_idx]
             local is_custom = author_data and author_data.name == 'Custom Music'
             if is_custom and STATE.active_tab == 1 and STATE.search_string == '' then
-                self.subviews.footer_instructions:setText("[Enter] Play Now  |  [Shift+Enter] Add to Queue  |  [Shift+S] Sync Custom Music")
+                self.subviews.footer_instructions:setText("[Enter] Play Now  |  [Shift+Enter] Add to Queue  |  [T] Switch View")
                 if self.subviews.sync_button then self.subviews.sync_button.visible = true end
             else
                 self.subviews.footer_instructions:setText("[Enter] Play Now  |  [Shift+Enter] Add to Queue  |  [T] Switch View")
@@ -940,7 +895,8 @@ function Dwarftify:updateFilters()
     end
 
     local function makeTrackChoice(track, is_queue)
-        local is_liked = STATE.liked_songs[tostring(track.id)]
+        local key = track.orig_id or tostring(track.id)
+        local is_liked = STATE.liked_songs[key] or STATE.liked_songs[tostring(track.id)]
         local is_queued = queued_ids[track.id]
         local heart = is_liked and string.char(3) or ' '
         
@@ -1031,7 +987,8 @@ function Dwarftify:updateFilters()
     if STATE.active_tab == 3 then
         local liked_choices = {}
         for _, track in ipairs(self.library) do
-            if STATE.liked_songs[tostring(track.id)] then
+            local key = track.orig_id or tostring(track.id)
+            if STATE.liked_songs[key] or STATE.liked_songs[tostring(track.id)] then
                 local choice = makeTrackChoice(track, false)
                 if search_lower == "" or choice.search_key:find(search_lower, 1, true) then
                     table.insert(liked_choices, choice)
@@ -1072,7 +1029,6 @@ function Dwarftify:onRenderBody(dc)
             local stat_label = self.subviews.now_playing_status
             
             if display_id == -1 or display_id == 0 then
-                self._current_np_title = nil
                 np_label:setText({{text = "Now Playing: None (Silence)", pen = COLOR_GREY}})
             else
                 local title = "Track #" .. display_id
@@ -1084,9 +1040,12 @@ function Dwarftify:onRenderBody(dc)
                         break
                     end
                 end
-                self._current_np_title = title
-                self._current_np_author = author
-                self._current_np_id = display_id
+                np_label:setText({
+                    {text = "Now Playing: ", pen = COLOR_WHITE},
+                    {text = title, pen = COLOR_LIGHTGREEN},
+                    {text = author, pen = COLOR_CYAN},
+                    {text = " [ID:" .. display_id .. "]", pen = COLOR_DARKGREY}
+                })
             end
             
             local active_str = m.music_active and "Active" or "Inactive (Engine Override)"
@@ -1108,7 +1067,11 @@ end
 function Dwarftify:getTrackUnderMouse()
     local flist
     if STATE.active_tab == 1 then
-        flist = self.subviews.list_browse_tracks
+        if STATE.search_string ~= "" then
+            flist = self.subviews.list_search_tracks
+        else
+            flist = self.subviews.list_browse_tracks
+        end
     elseif STATE.active_tab == 2 then
         flist = self.subviews.list_queue
     elseif STATE.active_tab == 3 then
@@ -1125,78 +1088,7 @@ function Dwarftify:getTrackUnderMouse()
     return nil, nil
 end
 
-function Dwarftify:onRenderFrame(dc, rect)
-    local tick = dfhack.getTickCount()
-    local marquee_speed = 300 -- ms per character step
-    
-    local active_list = nil
-    if STATE.active_tab == 1 then
-        active_list = (STATE.search_string ~= "") and self.subviews.list_search_tracks or self.subviews.list_browse_tracks
-    elseif STATE.active_tab == 2 then
-        active_list = self.subviews.list_queue
-    elseif STATE.active_tab == 3 then
-        active_list = self.subviews.list_liked
-    end
 
-    if active_list then
-        local choices = active_list:getChoices()
-        if choices then
-            for _, choice in ipairs(choices) do
-                if choice.raw_title and choice.max_len and #choice.raw_title > choice.max_len and choice.title_chunk then
-                    local overflow = #choice.raw_title - choice.max_len
-                    -- Ping-pong marquee: wait at start, scroll, wait at end, scroll back
-                    -- Adding 6 steps for waiting (3 at start, 3 at end)
-                    local cycle_steps = (overflow * 2) + 6
-                    local cycle_time = cycle_steps * marquee_speed
-                    local phase = math.floor((tick % cycle_time) / marquee_speed)
-                    
-                    local offset = 0
-                    if phase < 3 then
-                        offset = 0 -- Pause at start
-                    elseif phase < 3 + overflow then
-                        offset = phase - 3 -- Scroll right
-                    elseif phase < 6 + overflow then
-                        offset = overflow -- Pause at end
-                    else
-                        offset = overflow - (phase - (6 + overflow)) -- Scroll left (rewind)
-                        if offset < 0 then offset = 0 end
-                    end
-                    
-                    choice.title_chunk.text = choice.raw_title:sub(offset + 1, offset + choice.max_len)
-                elseif choice.raw_title and choice.title_chunk then
-                    choice.title_chunk.text = choice.raw_title
-                end
-            end
-        end
-    end
-    
-    local np_label = self.subviews.now_playing
-    if self._current_np_title and np_label then
-        local display_text = self._current_np_title
-        local max_np_len = 45
-        
-        -- Always pad and infinitely scroll, regardless of length
-        local padded = display_text .. "   ***   "
-        local total_len = #padded
-        
-        local scroll_speed = 250 -- ms per char
-        local offset = math.floor(tick / scroll_speed) % total_len
-        
-        display_text = padded:sub(offset + 1, offset + max_np_len)
-        if #display_text < max_np_len then
-            display_text = display_text .. padded:sub(1, max_np_len - #display_text)
-        end
-        
-        np_label:setText({
-            {text = "Now Playing: ", pen = COLOR_WHITE},
-            {text = display_text, pen = COLOR_LIGHTGREEN},
-            {text = self._current_np_author or "", pen = COLOR_CYAN},
-            {text = " [ID:" .. (self._current_np_id or "") .. "]", pen = COLOR_DARKGREY}
-        })
-    end
-    
-    Dwarftify.super.onRenderFrame(self, dc, rect)
-end
 
 function Dwarftify:onInput(keys)
     if keys._MOUSE_R then
@@ -1248,6 +1140,9 @@ function Dwarftify:onInput(keys)
     return Dwarftify.super.onInput(self, keys)
 end
 
-if dfhack_flags.module then return end
-local screen = Dwarftify{}
-screen:show()
+if not dfhack_flags.module then
+    local dwarftify = reqscript('gui/dwarftify')
+    local screen = dwarftify.Dwarftify{}
+    screen:show()
+    return
+end

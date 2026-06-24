@@ -1,0 +1,80 @@
+music_file_fnvr
+
+[OBJECT:MUSIC_FILE]
+
+[MUSIC_FILE:FNVR_BIG_IRON]
+	[FILE:big_iron.ogg]
+	[TITLE:Big Iron]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_GOIN_UNDER]
+	[FILE:goin_under.ogg]
+	[TITLE:Goin Under]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_HAPPY_TIMES]
+	[FILE:happy_times.ogg]
+	[TITLE:Happy Times]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_HEARTACHES_BY_THE_NUMBERS]
+	[FILE:heartaches_by_the_numbers.ogg]
+	[TITLE:Heartaches by the Numbers]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_IM_MOVING_OUT]
+	[FILE:im_moving_out.ogg]
+	[TITLE:I'm Moving Out]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_IM_SO_BLUE]
+	[FILE:im_so_blue.ogg]
+	[TITLE:I'm So Blue]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_IN_THE_SHADOW_OF_THE_VALLEY]
+	[FILE:in_the_shadow_of_the_valley.ogg]
+	[TITLE:In The Shadow Of The Valley]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_ITS_A_SIN_TO_TELL_A_LIE]
+	[FILE:its_a_sin_to_tell_a_lie.ogg]
+	[TITLE:It's A Sin To Tell A Lie]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_ITS_A_SIN]
+	[FILE:its_a_sin.ogg]
+	[TITLE:Its A Sin]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_LAZY_DAY_BLUES]
+	[FILE:lazy_day_blues.ogg]
+	[TITLE:Lazy Day Blues]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_LETS_RIDE_INTO_THE_SUNSET_TOGETHER]
+	[FILE:lets_ride_into_the_sunset_together.ogg]
+	[TITLE:Let's Ride Into The Sunset Together]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_LONE_STAR]
+	[FILE:lone_star.ogg]
+	[TITLE:Lone Star]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_ROUNDHOUSE_ROCK]
+	[FILE:roundhouse_rock.ogg]
+	[TITLE:Roundhouse Rock]
+	[AUTHOR:Mojave Music Radio]
+
+[MUSIC_FILE:FNVR_STARS_OF_THE_MIDNIGHT_RANGER]
+	[FILE:stars_of_the_midnight_ranger.ogg]
+	[TITLE:Stars Of The Midnight Ranger]
+	[AUTHOR:Mojave Music Radio]
+
+
+[MUSIC_FILE:FNVR_JOHNNY_GUITAR]
+	[FILE:johnny_guitar.ogg]
+	[TITLE:Johnny Guitar]
+	[AUTHOR:Mojave Music Radio]
+
