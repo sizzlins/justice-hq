@@ -161,18 +161,6 @@ local function disable_all_announcements()
     dfhack.gui.showAnnouncement('Disabled ' .. count .. ' ' .. target_mode .. ' announcements!', COLOR_LIGHTRED)
 end
 
-local function reset_announcements()
-    local DEFAULTS_PATH = 'dfhack-config/announce-defaults.json'
-    local data = json.decode_file(DEFAULTS_PATH)
-    if type(data) ~= 'table' then
-        dfhack.gui.showAnnouncement('No defaults snapshot found or failed to parse.', COLOR_LIGHTRED)
-        return
-    end
-    
-    apply_announcements(data)
-    dfhack.gui.showAnnouncement('Announcement settings reset to vanilla defaults!', COLOR_LIGHTCYAN)
-end
-
 local function toggle_column(flag_name)
     local flags = df.global.d_init.announcements.flags
     local target_mode = TARGET_MODES[current_target_idx]
@@ -202,18 +190,6 @@ local function toggle_column(flag_name)
     local status = new_val and 'ENABLED' or 'DISABLED'
     dfhack.gui.showAnnouncement(flag_name .. ' column ' .. status .. ' for ' .. count .. ' ' .. target_mode .. ' items.', new_val and COLOR_LIGHTGREEN or COLOR_LIGHTRED)
 end
-
--- On first load, snapshot the current (vanilla) state as the defaults
-local function snapshot_defaults_if_needed()
-    local DEFAULTS_PATH = 'dfhack-config/announce-defaults.json'
-    if dfhack.filesystem.isfile(DEFAULTS_PATH) then return end
-    
-    local data = serialize_announcements()
-    pcall(function() json.encode_file(data, DEFAULTS_PATH) end)
-    print('Announce-Settings: Vanilla defaults snapshot saved to ' .. DEFAULTS_PATH)
-end
-
-snapshot_defaults_if_needed()
 
 -- ===========================
 -- Overlay Widgets
@@ -255,14 +231,6 @@ function AnnounceSettingsProfileOverlay:init()
                     label = 'Disable ALL',
                     text_pen = COLOR_LIGHTRED,
                     on_activate = disable_all_announcements,
-                },
-                widgets.HotkeyLabel{
-                    frame = {t = 4, l = 1},
-                    key = 'CUSTOM_CTRL_R',
-                    label = 'Reset',
-                    text_pen = COLOR_WHITE,
-                    on_activate = reset_announcements,
-                },
             }
         }
     }
